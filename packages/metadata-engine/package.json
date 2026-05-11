@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@clusterdata/shared": "workspace:*"
+    "@clusterdata/shared": "workspace:*",
+    "pg": "^8.20.0"
   }
 }

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { authorizeAccess, assertAccess } from "../src/index.js";
+import {
+  assertAccess,
+  assertAccessRequestInput,
+  assertChatRequestSecurity,
+  assertDatasetProfileRequestSecurity,
+  assertSqlRequestSecurity,
+  authorizeAccess,
+  buildRequestSecurityPolicy
+} from "../src/index.js";
 
 describe("security", () => {
   it("blocks cross-tenant access", () => {
@@ -22,6 +30,88 @@ describe("security", () => {
         action: "read"
       })
     ).not.toThrow();
+  });
+
+  it("rejects invalid access request fields", () => {
+    expect(() =>
+      assertAccessRequestInput({
+        role: "owner",
+        tenantId: "a",
+        resourceTenantId: "a",
+        action: "read"
+      })
+    ).toThrow("Invalid security role");
+
+    expect(() =>
+      assertAccessRequestInput({
+        role: "viewer",
+        tenantId: "a",
+        resourceTenantId: "a",
+        action: "export"
+      })
+    ).toThrow("Invalid security action");
+  });
+
+  it("guards chat request size", () => {
+    const policy = buildRequestSecurityPolicy({
+      maxChatMessageChars: 4
+    });
+
+    expect(() =>
+      assertChatRequestSecurity(
+        {
+          sessionId: "session",
+          message: "hello"
+        },
+        policy
+      )
+    ).toThrow("message is too large");
+  });
+
+  it("guards SQL request size and null bytes", () => {
+    const policy = buildRequestSecurityPolicy({
+      maxSqlChars: 10
+    });
+
+    expect(() =>
+      assertSqlRequestSecurity(
+        {
+          sql: "select * from Tenant limit 10"
+        },
+        policy
+      )
+    ).toThrow("sql is too large");
+
+    expect(() =>
+      assertSqlRequestSecurity({
+        sql: "select \0"
+      })
+    ).toThrow("SQL cannot contain null bytes");
+  });
+
+  it("guards dataset row and field limits", () => {
+    const policy = buildRequestSecurityPolicy({
+      maxDatasetRows: 1,
+      maxDatasetFields: 1
+    });
+
+    expect(() =>
+      assertDatasetProfileRequestSecurity(
+        {
+          rows: [{ region: "north" }, { region: "south" }]
+        },
+        policy
+      )
+    ).toThrow("Too many dataset rows");
+
+    expect(() =>
+      assertDatasetProfileRequestSecurity(
+        {
+          rows: [{ region: "north", amount: 10 }]
+        },
+        policy
+      )
+    ).toThrow("Too many dataset fields");
   });
 });
 

@@ -13,6 +13,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@clusterdata/shared": "workspace:*"
+    "@clusterdata/metadata-engine": "workspace:*",
+    "@clusterdata/shared": "workspace:*",
+    "node-sql-parser": "^5.4.0"
   }
 }

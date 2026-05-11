@@ -21,6 +21,7 @@
     "@clusterdata/sql-agent": "workspace:*",
     "@clusterdata/tool-system": "workspace:*",
     "@fastify/cors": "^11.2.0",
+    "dotenv": "^16.6.1",
     "fastify": "^5.8.5",
     "zod": "^4.4.3"
   }

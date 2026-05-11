@@ -1,8 +1,15 @@
+import dotenv from "dotenv";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createLogger, safeErrorMessage } from "@clusterdata/shared";
 import { buildApi } from "./app.js";
 import { loadApiConfig } from "./config.js";
 
 const logger = createLogger("api-server");
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const rootEnvPath = resolve(moduleDir, "../../../.env");
+
+dotenv.config({ path: rootEnvPath, override: true });
 
 async function main(): Promise<void> {
   const config = loadApiConfig(process.env);
