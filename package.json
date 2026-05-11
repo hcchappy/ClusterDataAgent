@@ -1,0 +1,42 @@
+{
+  "name": "cluster-data-agent",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.0.9",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "db:generate": "pnpm --filter @clusterdata/database db:generate",
+    "db:validate": "pnpm --filter @clusterdata/database db:validate"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@prisma/client": "^7.8.0",
+    "fastify": "^5.8.5",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.6.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.3.0",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.3",
+    "prisma": "^7.8.0",
+    "tsx": "^4.21.0",
+    "turbo": "^2.9.12",
+    "typescript": "^5.8.5",
+    "typescript-eslint": "^8.59.2",
+    "vite": "^6.0.1",
+    "vitest": "^4.1.5"
+  }
+}

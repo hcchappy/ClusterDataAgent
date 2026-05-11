@@ -1,0 +1,21 @@
+{
+  "name": "@clusterdata/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "db:generate": "prisma generate --schema=prisma/schema.prisma",
+    "db:validate": "prisma validate --schema=prisma/schema.prisma",
+    "lint": "eslint src tests",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@clusterdata/shared": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

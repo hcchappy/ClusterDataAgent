@@ -1,0 +1,15 @@
+model = "gpt-5.5"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+model_reasoning_effort = "high"
+model_reasoning_summary = "detailed"
+disable_telemetry = true
+
+[tui]
+notifications = true
+
+[tools]
+web_search = true
+
+[history]
+persistence = "save-all"

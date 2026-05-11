@@ -1,0 +1,27 @@
+{
+  "name": "@clusterdata/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "lint": "eslint src tests",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@clusterdata/agent-core": "workspace:*",
+    "@clusterdata/analysis-service": "workspace:*",
+    "@clusterdata/chart-engine": "workspace:*",
+    "@clusterdata/database": "workspace:*",
+    "@clusterdata/metadata-engine": "workspace:*",
+    "@clusterdata/security": "workspace:*",
+    "@clusterdata/shared": "workspace:*",
+    "@clusterdata/sql-agent": "workspace:*",
+    "@clusterdata/tool-system": "workspace:*",
+    "@fastify/cors": "^11.2.0",
+    "fastify": "^5.8.5",
+    "zod": "^4.4.3"
+  }
+}
