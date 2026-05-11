@@ -23,6 +23,7 @@ Commands:
 - `pnpm lint`
 - `pnpm typecheck`
 - `pnpm dev`
+- `start.md` contains the startup sequence
 
 Apps:
 - API: `apps/api`
