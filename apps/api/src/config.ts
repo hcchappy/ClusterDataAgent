@@ -14,6 +14,7 @@ const ConfigSchema = z.object({
   OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   AGENT_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(6),
   AGENT_MEMORY_LIMIT: z.coerce.number().int().positive().default(20),
+  AGENT_MEMORY_STORE_PATH: z.string().optional().default(""),
   API_MAX_SESSION_ID_CHARS: z.coerce
     .number()
     .int()
@@ -98,6 +99,7 @@ export interface ApiConfig {
   readonly openAiTimeoutMs: number;
   readonly agentMaxToolCalls: number;
   readonly agentMemoryLimit: number;
+  readonly agentMemoryStorePath: string;
   readonly requestSecurity: {
     readonly maxSessionIdChars: number;
     readonly maxChatMessageChars: number;
@@ -137,6 +139,7 @@ export function loadApiConfig(env: NodeJS.ProcessEnv): ApiConfig {
     openAiTimeoutMs: parsed.data.OPENAI_TIMEOUT_MS,
     agentMaxToolCalls: parsed.data.AGENT_MAX_TOOL_CALLS,
     agentMemoryLimit: parsed.data.AGENT_MEMORY_LIMIT,
+    agentMemoryStorePath: parsed.data.AGENT_MEMORY_STORE_PATH,
     requestSecurity: {
       maxSessionIdChars: parsed.data.API_MAX_SESSION_ID_CHARS,
       maxChatMessageChars: parsed.data.API_MAX_CHAT_MESSAGE_CHARS,

@@ -50,7 +50,7 @@ describe("web app", () => {
           {
             id: "welcome",
             role: "assistant",
-            content: "Agent core is online.",
+            content: "## Agent core is online.\n\n- Ready for SQL\n- Ready for charts",
             status: "complete"
           },
           {
@@ -85,12 +85,54 @@ describe("web app", () => {
           limit: 20
         }}
         isValidatingSql={false}
+        sqlQueryResult={{
+          columns: ["id", "name"],
+          rows: [{ id: "tenant-a", name: "Tenant A" }],
+          rowCount: 1,
+          durationMs: 8,
+          validation: {
+            allowed: true,
+            normalizedSql: "select id from Tenant limit 20",
+            referencedTables: ["Tenant"],
+            referencedColumns: ["id"],
+            limit: 20
+          }
+        }}
+        sqlHistory={[
+          {
+            id: "sql-history-1",
+            sql: "select id, name from Tenant limit 20",
+            executedAt: "2026-05-12T14:00:00.000Z",
+            result: {
+              columns: ["id", "name"],
+              rows: [{ id: "tenant-a", name: "Tenant A" }],
+              rowCount: 1,
+              durationMs: 8,
+              validation: {
+                allowed: true,
+                normalizedSql: "select id, name from Tenant limit 20",
+                referencedTables: ["Tenant"],
+                referencedColumns: ["id", "name"],
+                limit: 20
+              }
+            }
+          }
+        ]}
+        isRunningSql={false}
         onSqlChange={() => {}}
         onValidateSql={() => {}}
+        onRunSql={() => {}}
+        onReuseSqlHistory={() => {}}
+        onExportSqlResult={() => {}}
+        onClearSqlHistory={() => {}}
         datasetValue="[]"
+        datasetRows={[
+          { region: "north", revenue: 10 },
+          { region: "south", revenue: 20 }
+        ]}
         datasetProfile={{
           rowCount: 1,
-          fieldCount: 1,
+          fieldCount: 2,
           fields: [
             {
               name: "revenue",
@@ -100,7 +142,22 @@ describe("web app", () => {
               missingRatio: 0,
               distinctCount: 1,
               examples: [10],
-              average: 10
+              average: 10,
+              minimum: 10,
+              maximum: 10,
+              median: 10,
+              standardDeviation: 0,
+              outliers: []
+            },
+            {
+              name: "region",
+              kind: "string",
+              count: 1,
+              missingCount: 0,
+              missingRatio: 0,
+              distinctCount: 1,
+              examples: ["north"],
+              topValues: [{ value: "north", count: 1 }]
             }
           ],
           quality: {
@@ -147,11 +204,18 @@ describe("web app", () => {
     expect(html).toContain("Conversation");
     expect(html).toContain("Tool Activity");
     expect(html).toContain("SQL Guardrail");
+    expect(html).toContain("Run Query");
+    expect(html).toContain("Export CSV");
+    expect(html).toContain("Recent Queries");
+    expect(html).toContain("Clear History");
     expect(html).toContain("Dataset Profile");
     expect(html).toContain("Chart Recommendations");
     expect(html).toContain("Access Check");
     expect(html).toContain("Viewer role is read-only");
     expect(html).toContain("validate-sql");
+    expect(html).toContain("Tenant A");
+    expect(html).toContain("<h4>");
+    expect(html).toContain("<svg");
     expect(html).toContain("revenue by region");
     expect(html).toContain("Input Limit");
     expect(html).toContain("1000");

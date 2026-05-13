@@ -24,6 +24,47 @@ describe("chart-engine", () => {
     expect(option.series[0].type).toBe("bar");
   });
 
+  it("optimizes large category series with sampling and zoom metadata", () => {
+    const labels = Array.from({ length: 240 }, (_unused, index) => `Day ${index + 1}`);
+    const values = labels.map((_label, index) => index + 1);
+    const option = buildEChartsOption("Revenue", labels, values, "line");
+
+    expect(option.meta).toMatchObject({
+      originalPointCount: 240,
+      sampled: true,
+      strategy: "stride",
+      interactiveZoom: true,
+      progressive: true
+    });
+    expect(option.xAxis?.data?.length).toBeLessThanOrEqual(120);
+    expect(option.series[0]).toMatchObject({
+      sampling: "lttb",
+      progressive: 500
+    });
+    expect(option.dataZoom).toHaveLength(2);
+    expect(option.animation).toBe(false);
+  });
+
+  it("aggregates large pie categories into top slices and other", () => {
+    const labels = Array.from({ length: 10 }, (_unused, index) => `Region ${index + 1}`);
+    const values = [50, 40, 30, 20, 10, 9, 8, 7, 6, 5];
+    const option = buildEChartsOption("Revenue by region", labels, values, "pie");
+    const seriesData = option.series[0].data;
+
+    expect(option.meta).toMatchObject({
+      originalPointCount: 10,
+      renderedPointCount: 8,
+      sampled: true,
+      strategy: "top-n-plus-other"
+    });
+    expect(seriesData).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Region 1", value: 50 }),
+        expect.objectContaining({ name: "Other", value: 18 })
+      ])
+    );
+  });
+
   it("recommends time series charts from date and numeric fields", () => {
     const profile = profileDataset({
       rows: [

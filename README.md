@@ -3,13 +3,13 @@
 Monorepo status:
 - workspace scaffolded
 - API, web app, and core domain packages are in place
-- agent-core chat and streaming endpoints are in place
-- web app now uses the chat streaming endpoint as an interactive ChatBI workbench with SQL validation, dataset profiling, and chart recommendation panels
+- agent-core chat, native upstream SSE streaming, and session memory are in place
+- web app now uses the chat streaming endpoint as an interactive ChatBI workbench with markdown chat rendering, SQL validation, query history/CSV export, dataset profiling, and chart recommendation panels with visual previews
 - web workbench now includes an Access Check panel for tenant and role authorization decisions
 - metadata-engine now loads the Prisma schema catalog from `packages/database/prisma/schema.prisma`
 - sql-agent now validates and generates SELECT SQL against the loaded schema catalog
-- analysis-service now profiles JSON datasets with field statistics and data quality warnings
-- chart-engine now recommends charts from dataset profiles, including time series, category comparisons, numeric distributions, and outlier views
+- analysis-service now profiles JSON datasets with field statistics, data quality warnings, and time series trend/anomaly analysis
+- chart-engine now recommends charts from dataset profiles, including time series, category comparisons, numeric distributions, outlier views, and large-series sampling hints
 - tests, lint, typecheck, and build all pass
 
 Current priority:
@@ -34,12 +34,14 @@ Commands:
 
 Environment:
 - Local development now reads the root `.env` file automatically for the API server.
+- `.env.example` is a template only; copy runtime secrets and overrides into the root `.env`.
 - `OPENAI_API_KEY` enables `/api/chat` and `/api/chat/stream`
 - `OPENAI_ENDPOINT` sets the compatible API base or full responses endpoint
 - `OPENAI_MODEL` sets the default model for agent requests
 - `OPENAI_TIMEOUT_MS` configures the OpenAI request timeout
 - `AGENT_MAX_TOOL_CALLS` caps tool loops per turn
 - `AGENT_MEMORY_LIMIT` controls in-memory session history size
+- `AGENT_MEMORY_STORE_PATH` enables file-backed session history persistence across API restarts
 - API request guardrails are configurable with `API_MAX_*` environment variables for chat text, SQL text, metadata search, dataset profiling, chart inputs, and generated SQL column counts
 
 Apps:
@@ -78,11 +80,14 @@ Metadata and SQL:
 - `GET /api/metadata/search?q=tenant&limit=5` searches table, column, and relation metadata.
 - `POST /api/metadata/refresh` reloads the Prisma schema catalog and updates metadata-backed SQL tools.
 - `POST /api/sql/validate` validates only bounded SELECT/WITH statements, rejects unknown tables, unknown columns, ambiguous unqualified columns, unsafe `SELECT INTO`, destructive SQL, and checks alias/join references when metadata is available.
+- `POST /api/sql/query` validates a bounded read-only SQL statement, executes it inside a PostgreSQL read-only transaction, and returns rows plus column metadata.
 - `POST /api/sql/suggest` generates a safe SELECT from known table and column names.
 - `POST /api/analysis/series` summarizes a numeric series.
+- `POST /api/analysis/time-series` analyzes time series cadence, moving averages, and anomalies from timestamp/value points.
 - `POST /api/analysis/profile` profiles JSON rows, infers field kinds, computes numeric/category/date statistics, and reports missing, mixed, empty, and duplicate quality warnings.
 - `POST /api/charts/suggest` accepts either legacy labels/values input or a dataset profile and returns chart recommendations.
-- The registered agent tools include `validate-sql`, `generate-sql`, `summarize-series`, `profile-dataset`, `suggest-chart`, and `recommend-charts`.
+- Large legacy chart payloads are automatically sampled for rendering, add zoom controls, and mark progressive rendering hints in the returned chart option metadata.
+- The registered agent tools include `validate-sql`, `generate-sql`, `query-sql`, `summarize-series`, `analyze-time-series`, `profile-dataset`, `suggest-chart`, and `recommend-charts`.
 - Current catalog inference is in-process; use `POST /api/metadata/refresh` after changing the Prisma schema or live PostgreSQL schema.
 
 Security guardrails:
@@ -105,25 +110,36 @@ SQL examples:
   - `curl -X POST http://127.0.0.1:3001/api/sql/validate -H "content-type: application/json" -d "{\"sql\":\"select o.id, c.name from cda_orders o join cda_customers c on o.customer_id = c.id limit 20\"}"`
 - Suggest:
   - `curl -X POST http://127.0.0.1:3001/api/sql/suggest -H "content-type: application/json" -d "{\"tableName\":\"AuditLog\",\"columns\":[\"id\",\"tenantId\",\"action\"],\"limit\":25}"`
+- Query:
+  - `curl -X POST http://127.0.0.1:3001/api/sql/query -H "content-type: application/json" -d "{\"sql\":\"select id, name from Tenant limit 20\"}"`
 
 Analysis examples:
 - Summarize a numeric series:
   - `curl -X POST http://127.0.0.1:3001/api/analysis/series -H "content-type: application/json" -d "{\"points\":[1,2,3,4]}"`
+- Analyze a time series:
+  - `curl -X POST http://127.0.0.1:3001/api/analysis/time-series -H "content-type: application/json" -d "{\"points\":[{\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"value\":1},{\"timestamp\":\"2026-01-02T00:00:00.000Z\",\"value\":1},{\"timestamp\":\"2026-01-03T00:00:00.000Z\",\"value\":1},{\"timestamp\":\"2026-01-04T00:00:00.000Z\",\"value\":10}],\"movingAverageWindow\":2,\"anomalyThreshold\":1.5}"`
 - Profile JSON rows:
   - `curl -X POST http://127.0.0.1:3001/api/analysis/profile -H "content-type: application/json" -d "{\"rows\":[{\"region\":\"north\",\"amount\":10,\"active\":true},{\"region\":\"south\",\"amount\":20,\"active\":false},{\"region\":\"north\",\"amount\":30,\"active\":true}]}"`
+- Time series analysis sorts points by timestamp, summarizes the numeric trend, infers cadence regularity, computes trailing moving averages, and flags z-score anomalies.
 
 Chart examples:
 - Legacy chart suggestion:
   - `curl -X POST http://127.0.0.1:3001/api/charts/suggest -H "content-type: application/json" -d "{\"title\":\"Revenue\",\"labels\":[\"Jan\",\"Feb\"],\"values\":[10,20],\"hasTimeAxis\":false}"`
 - Profile-aware chart recommendations:
   - `curl -X POST http://127.0.0.1:3001/api/charts/suggest -H "content-type: application/json" -d "{\"profile\":{\"rowCount\":3,\"fieldCount\":3,\"fields\":[{\"name\":\"createdAt\",\"kind\":\"date\",\"count\":3,\"missingCount\":0,\"missingRatio\":0,\"distinctCount\":3,\"examples\":[\"2026-01-01T00:00:00.000Z\"],\"minimum\":\"2026-01-01T00:00:00.000Z\",\"maximum\":\"2026-01-03T00:00:00.000Z\"},{\"name\":\"revenue\",\"kind\":\"number\",\"count\":3,\"missingCount\":0,\"missingRatio\":0,\"distinctCount\":3,\"examples\":[10,20,30],\"minimum\":10,\"maximum\":30,\"average\":20,\"median\":20,\"standardDeviation\":8.16,\"outliers\":[]},{\"name\":\"region\",\"kind\":\"string\",\"count\":3,\"missingCount\":0,\"missingRatio\":0,\"distinctCount\":2,\"examples\":[\"north\",\"south\"],\"topValues\":[{\"value\":\"north\",\"count\":2},{\"value\":\"south\",\"count\":1}]}],\"quality\":{\"emptyFieldCount\":0,\"highMissingFieldCount\":0,\"mixedFieldCount\":0,\"duplicateRowCount\":0,\"warnings\":[]}},\"maxRecommendations\":3}"`
+- Large time-series and category payloads are down-sampled before rendering; pie charts collapse long tails into `Other`, and line/bar options expose optimization metadata under `option.meta`.
 
 Web workbench:
 - Open `http://127.0.0.1:3000`.
 - Use the Conversation panel for streaming agent chat.
+- Assistant messages render markdown for headings, lists, code blocks, and links.
 - Use SQL Guardrail to validate metadata-aware SQL directly.
+- Successful SQL runs are stored in browser-local history, can be replayed into the editor, and can be exported as CSV.
+- Use SQL Guardrail to validate and execute read-only SQL, then inspect the returned rows.
 - Use Access Check to verify tenant isolation and role/action authorization decisions.
 - Use Dataset Profile with JSON rows, then Chart Recommendations to get profile-aware chart suggestions.
+- Chart recommendations render inline previews from the profiled dataset rows instead of showing recommendation text alone.
+- Inline previews also sample large row sets so the workbench stays responsive when chart inputs grow.
 
 PostgreSQL test schema:
 - The development scanner was verified against `127.0.0.1:5433/clusterdata` using test tables `cda_customers`, `cda_orders`, and `cda_order_events`.
@@ -142,8 +158,11 @@ Agent endpoints:
 - `POST /api/chat/stream`
   - request: same as `/api/chat`
   - response: `text/event-stream` with events `session.started`, `response.output_text.delta`, `tool.call.started`, `tool.call.completed`, `response.completed`, `response.failed`
+  - OpenAI-compatible upstream SSE text deltas are forwarded as they arrive; non-streaming transports fall back to chunked completed text so local tests and mocks keep working.
 
 Notes:
-- Agent memory is stored in-process only and is cleared when the API restarts.
+- Agent memory uses the configured `AGENT_MEMORY_LIMIT` cap for each session.
+- Set `AGENT_MEMORY_STORE_PATH` to persist session history to a local JSON file across API restarts.
+- Without `AGENT_MEMORY_STORE_PATH`, agent memory stays in-process and is cleared when the API restarts.
 - `OPENAI_ENDPOINT` accepts either a base URL like `https://openrouter.ai/api/v1` or a full endpoint like `https://openrouter.ai/api/v1/responses`.
 - The Python `analysis-service` roadmap item is still a later phase; current analysis remains TypeScript-based.

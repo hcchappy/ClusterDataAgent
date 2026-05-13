@@ -3,6 +3,7 @@ import type { ReactElement, ReactNode } from "react";
 import { createLogger, safeErrorMessage } from "@clusterdata/shared";
 import {
   checkAccess,
+  executeSqlQuery,
   profileDataset,
   recommendCharts,
   requestJson,
@@ -12,11 +13,28 @@ import {
   type AccessDecision,
   type ChartRecommendation,
   type ChatStreamEvent,
+  type DatasetRow,
   type DatasetProfile,
   type SecurityCheckRequest,
+  type SqlQueryResult,
   type SqlValidationResult,
   type UserRole
 } from "./api.js";
+import { ChartRecommendationPreview } from "./chart-preview.js";
+import { MarkdownContent } from "./markdown.js";
+import {
+  MAX_SQL_HISTORY_ENTRIES,
+  SQL_HISTORY_STORAGE_KEY,
+  buildSqlExportFileName,
+  buildSqlPreview,
+  convertSqlResultToCsv,
+  createSqlHistoryEntry,
+  getValidationBadgeState,
+  parseSqlHistory,
+  serializeSqlHistory,
+  upsertSqlHistory,
+  type SqlHistoryEntry
+} from "./sql-workbench.js";
 
 interface OverviewResponse {
   ok: boolean;
@@ -143,7 +161,15 @@ export function AppShell({
   isValidatingSql,
   onSqlChange,
   onValidateSql,
+  sqlQueryResult,
+  sqlHistory,
+  isRunningSql,
+  onRunSql,
+  onReuseSqlHistory,
+  onExportSqlResult,
+  onClearSqlHistory,
   datasetValue,
+  datasetRows,
   datasetProfile,
   chartRecommendations,
   isProfilingDataset,
@@ -170,9 +196,17 @@ export function AppShell({
   readonly sqlValue: string;
   readonly sqlResult: SqlValidationResult | null;
   readonly isValidatingSql: boolean;
+  readonly sqlQueryResult: SqlQueryResult | null;
+  readonly sqlHistory: readonly SqlHistoryEntry[];
+  readonly isRunningSql: boolean;
   readonly onSqlChange: (value: string) => void;
   readonly onValidateSql: () => void;
+  readonly onRunSql: () => void;
+  readonly onReuseSqlHistory: (entry: SqlHistoryEntry) => void;
+  readonly onExportSqlResult: (entry?: SqlHistoryEntry) => void;
+  readonly onClearSqlHistory: () => void;
   readonly datasetValue: string;
+  readonly datasetRows: readonly DatasetRow[];
   readonly datasetProfile: DatasetProfile | null;
   readonly chartRecommendations: readonly ChartRecommendation[];
   readonly isProfilingDataset: boolean;
@@ -243,7 +277,11 @@ export function AppShell({
                     <span>{message.role === "assistant" ? "Agent" : "You"}</span>
                     <span>{message.status === "streaming" ? "streaming" : "done"}</span>
                   </div>
-                  <p>{message.content || (message.status === "streaming" ? "..." : "")}</p>
+                  {message.content ? (
+                    <MarkdownContent content={message.content} />
+                  ) : (
+                    <p>{message.status === "streaming" ? "..." : ""}</p>
+                  )}
                 </article>
               ))}
             </div>
@@ -282,7 +320,7 @@ export function AppShell({
             title="SQL Guardrail"
             actions={
               sqlResult ? (
-                <span className={`result-pill ${sqlResult.allowed ? "is-ok" : "is-bad"}`}>
+                <span className={`result-pill ${getValidationBadgeState(sqlResult)}`}>
                   {sqlResult.allowed ? "allowed" : "blocked"}
                 </span>
               ) : null
@@ -299,14 +337,24 @@ export function AppShell({
               />
               <div className="tool-footer">
                 <p className="subtle small">Validates against metadata, aliases, columns, and limits.</p>
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={isValidatingSql}
-                  onClick={onValidateSql}
-                >
-                  {isValidatingSql ? "Checking..." : "Validate SQL"}
-                </button>
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={isValidatingSql || isRunningSql}
+                    onClick={onValidateSql}
+                  >
+                    {isValidatingSql ? "Checking..." : "Validate SQL"}
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={isRunningSql}
+                    onClick={onRunSql}
+                  >
+                    {isRunningSql ? "Running..." : "Run Query"}
+                  </button>
+                </div>
               </div>
             </div>
             {sqlResult ? (
@@ -328,6 +376,20 @@ export function AppShell({
                 </dl>
               </div>
             ) : null}
+            {sqlQueryResult ? (
+              <SqlQueryResultView
+                result={sqlQueryResult}
+                onExport={() => {
+                  onExportSqlResult();
+                }}
+              />
+            ) : null}
+            <SqlHistoryView
+              history={sqlHistory}
+              onReuse={onReuseSqlHistory}
+              onExport={onExportSqlResult}
+              onClear={onClearSqlHistory}
+            />
           </Panel>
 
           <Panel
@@ -490,6 +552,11 @@ export function AppShell({
                       {recommendation.dimensions.join(", ") || "no dimensions"} to{" "}
                       {recommendation.metrics.join(", ") || "no metrics"}
                     </p>
+                    <ChartRecommendationPreview
+                      recommendation={recommendation}
+                      rows={datasetRows}
+                      profile={datasetProfile}
+                    />
                   </article>
                 ))}
               </div>
@@ -634,8 +701,141 @@ function DatasetProfileView({ profile }: { readonly profile: DatasetProfile }): 
   );
 }
 
+function SqlQueryResultView({
+  result,
+  onExport
+}: {
+  readonly result: SqlQueryResult;
+  readonly onExport: () => void;
+}): ReactElement {
+  return (
+    <div className="result-box">
+      <div className="query-summary-row">
+        <div className="query-summary">
+          <span>{result.rowCount} rows</span>
+          <span>{result.columns.length} columns</span>
+          <span>{result.durationMs} ms</span>
+        </div>
+        <button type="button" className="ghost-button" onClick={onExport}>
+          Export CSV
+        </button>
+      </div>
+      {result.rows.length === 0 ? (
+        <p className="subtle small">Query completed without returning rows.</p>
+      ) : (
+        <div className="result-table-wrap">
+          <table className="result-table">
+            <thead>
+              <tr>
+                {result.columns.map((column) => (
+                  <th key={column}>{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {result.rows.map((row, index) => (
+                <tr key={`row-${index}`}>
+                  {result.columns.map((column) => (
+                    <td key={`${index}-${column}`}>{formatQueryCell(row[column])}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SqlHistoryView({
+  history,
+  onReuse,
+  onExport,
+  onClear
+}: {
+  readonly history: readonly SqlHistoryEntry[];
+  readonly onReuse: (entry: SqlHistoryEntry) => void;
+  readonly onExport: (entry: SqlHistoryEntry) => void;
+  readonly onClear: () => void;
+}): ReactElement {
+  if (history.length === 0) {
+    return (
+      <div className="result-box">
+        <div className="history-header">
+          <strong>Recent Queries</strong>
+          <span className="subtle small">Stores the last {MAX_SQL_HISTORY_ENTRIES} successful runs in this browser.</span>
+        </div>
+        <p className="subtle small">Run a query to create a reusable history entry.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="result-box">
+      <div className="history-header">
+        <strong>Recent Queries</strong>
+        <div className="button-row">
+          <button type="button" className="ghost-button" onClick={onClear}>
+            Clear History
+          </button>
+        </div>
+      </div>
+      <div className="history-list">
+        {history.map((entry) => (
+          <article key={entry.id} className="history-item">
+            <div className="history-copy">
+              <strong className="mono">{buildSqlPreview(entry.sql)}</strong>
+              <span className="subtle small">
+                {entry.result.rowCount} rows, {entry.result.columns.length} columns, {entry.result.durationMs} ms
+              </span>
+              <span className="subtle small">{formatHistoryTimestamp(entry.executedAt)}</span>
+            </div>
+            <div className="button-row">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  onReuse(entry);
+                }}
+              >
+                Reuse
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  onExport(entry);
+                }}
+              >
+                CSV
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function formatQueryCell(value: unknown): string {
+  if (value === null || typeof value === "undefined") {
+    return "null";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return JSON.stringify(value);
 }
 
 function getLatestUsage(messages: readonly ChatMessage[]): UsageSummary | undefined {
@@ -669,7 +869,11 @@ export default function App(): ReactElement {
   const [sqlValue, setSqlValue] = useState(DEFAULT_SQL);
   const [sqlResult, setSqlResult] = useState<SqlValidationResult | null>(null);
   const [isValidatingSql, setIsValidatingSql] = useState(false);
+  const [sqlQueryResult, setSqlQueryResult] = useState<SqlQueryResult | null>(null);
+  const [sqlHistory, setSqlHistory] = useState<SqlHistoryEntry[]>([]);
+  const [isRunningSql, setIsRunningSql] = useState(false);
   const [datasetValue, setDatasetValue] = useState(DEFAULT_DATASET);
+  const [datasetRows, setDatasetRows] = useState<DatasetRow[]>([]);
   const [datasetProfile, setDatasetProfile] = useState<DatasetProfile | null>(null);
   const [chartRecommendations, setChartRecommendations] = useState<ChartRecommendation[]>([]);
   const [isProfilingDataset, setIsProfilingDataset] = useState(false);
@@ -698,6 +902,21 @@ export default function App(): ReactElement {
     };
 
     void loadOverview();
+  }, []);
+
+  useEffect(() => {
+    try {
+      const history = readStoredSqlHistory();
+
+      logger.info("sql history loaded", {
+        entryCount: history.length
+      });
+      setSqlHistory(history);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+      logger.error("failed to load sql history", { error: message });
+      setErrorMessage(message);
+    }
   }, []);
 
   const appendUserMessage = (content: string): string => {
@@ -854,6 +1073,76 @@ export default function App(): ReactElement {
     }
   };
 
+  const handleRunSql = async (): Promise<void> => {
+    setIsRunningSql(true);
+    setErrorMessage(null);
+
+    try {
+      const result = await executeSqlQuery(sqlValue);
+      const nextEntry = createSqlHistoryEntry(sqlValue, result);
+
+      setSqlResult(result.validation);
+      setSqlQueryResult(result);
+      logger.info("sql query completed", {
+        rowCount: result.rowCount,
+        columnCount: result.columns.length,
+        durationMs: result.durationMs
+      });
+      setSqlHistory((current) => {
+        const next = [...upsertSqlHistory(current, nextEntry)];
+
+        persistSqlHistory(next);
+        return next;
+      });
+    } catch (error) {
+      const message = safeErrorMessage(error);
+      logger.error("sql query failed", { error: message });
+      setErrorMessage(message);
+    } finally {
+      setIsRunningSql(false);
+    }
+  };
+
+  const handleReuseSqlHistory = (entry: SqlHistoryEntry): void => {
+    setSqlValue(entry.sql);
+    setSqlResult(entry.result.validation);
+    setSqlQueryResult(entry.result);
+    logger.info("sql history entry reused", {
+      entryId: entry.id,
+      rowCount: entry.result.rowCount
+    });
+    setStatusText("loaded query from history");
+  };
+
+  const handleExportSqlResult = (entry?: SqlHistoryEntry): void => {
+    const result = entry?.result ?? sqlQueryResult;
+
+    if (!result) {
+      return;
+    }
+
+    try {
+      exportSqlResultToCsv(result, entry?.executedAt);
+      logger.info("sql result exported", {
+        rowCount: result.rowCount,
+        columnCount: result.columns.length
+      });
+      setStatusText("query exported");
+      setErrorMessage(null);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+      logger.error("sql export failed", { error: message });
+      setErrorMessage(message);
+    }
+  };
+
+  const handleClearSqlHistory = (): void => {
+    setSqlHistory([]);
+    clearStoredSqlHistory();
+    logger.info("sql history cleared");
+    setStatusText("query history cleared");
+  };
+
   const handleProfileDataset = async (): Promise<void> => {
     setIsProfilingDataset(true);
     setErrorMessage(null);
@@ -867,6 +1156,7 @@ export default function App(): ReactElement {
 
       const profile = await profileDataset(parsedRows as Readonly<Record<string, unknown>>[]);
 
+      setDatasetRows(parsedRows as DatasetRow[]);
       setDatasetProfile(profile);
       setChartRecommendations([]);
     } catch (error) {
@@ -931,11 +1221,24 @@ export default function App(): ReactElement {
       sqlValue={sqlValue}
       sqlResult={sqlResult}
       isValidatingSql={isValidatingSql}
-      onSqlChange={setSqlValue}
+      sqlQueryResult={sqlQueryResult}
+      sqlHistory={sqlHistory}
+      isRunningSql={isRunningSql}
+      onSqlChange={(value) => {
+        setSqlValue(value);
+        setSqlQueryResult(null);
+      }}
       onValidateSql={() => {
         void handleValidateSql();
       }}
+      onRunSql={() => {
+        void handleRunSql();
+      }}
+      onReuseSqlHistory={handleReuseSqlHistory}
+      onExportSqlResult={handleExportSqlResult}
+      onClearSqlHistory={handleClearSqlHistory}
       datasetValue={datasetValue}
+      datasetRows={datasetRows}
       datasetProfile={datasetProfile}
       chartRecommendations={chartRecommendations}
       isProfilingDataset={isProfilingDataset}
@@ -943,7 +1246,12 @@ export default function App(): ReactElement {
       securityCheck={securityCheck}
       securityDecision={securityDecision}
       isCheckingAccess={isCheckingAccess}
-      onDatasetChange={setDatasetValue}
+      onDatasetChange={(value) => {
+        setDatasetValue(value);
+        setDatasetRows([]);
+        setDatasetProfile(null);
+        setChartRecommendations([]);
+      }}
       onProfileDataset={() => {
         void handleProfileDataset();
       }}
@@ -956,4 +1264,65 @@ export default function App(): ReactElement {
       }}
     />
   );
+}
+
+function readStoredSqlHistory(): SqlHistoryEntry[] {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return [];
+  }
+
+  return [...parseSqlHistory(window.localStorage.getItem(SQL_HISTORY_STORAGE_KEY))];
+}
+
+function persistSqlHistory(history: readonly SqlHistoryEntry[]): void {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+
+  window.localStorage.setItem(SQL_HISTORY_STORAGE_KEY, serializeSqlHistory(history));
+  logger.info("sql history persisted", {
+    entryCount: history.length
+  });
+}
+
+function clearStoredSqlHistory(): void {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+
+  window.localStorage.removeItem(SQL_HISTORY_STORAGE_KEY);
+}
+
+function exportSqlResultToCsv(result: SqlQueryResult, executedAt?: string): void {
+  if (typeof document === "undefined") {
+    throw new Error("CSV export is not available in this environment");
+  }
+
+  const csv = convertSqlResultToCsv(result);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = objectUrl;
+  link.download = buildSqlExportFileName(executedAt ?? new Date().toISOString());
+  link.style.display = "none";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+function formatHistoryTimestamp(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
 }

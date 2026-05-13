@@ -258,6 +258,73 @@ h2 {
   color: #97a4b7;
 }
 
+.message-content {
+  color: #e7ecf3;
+  line-height: 1.6;
+}
+
+.message-content p,
+.message-content ul,
+.message-content ol,
+.message-content blockquote,
+.message-content pre,
+.message-content h3,
+.message-content h4,
+.message-content h5 {
+  margin-bottom: 10px;
+}
+
+.message-content p:last-child,
+.message-content ul:last-child,
+.message-content ol:last-child,
+.message-content blockquote:last-child,
+.message-content pre:last-child,
+.message-content h3:last-child,
+.message-content h4:last-child,
+.message-content h5:last-child {
+  margin-bottom: 0;
+}
+
+.message-content ul,
+.message-content ol {
+  padding-left: 20px;
+}
+
+.message-content blockquote {
+  border-left: 3px solid #32415b;
+  padding-left: 12px;
+  color: #cdd9ea;
+}
+
+.message-content code {
+  padding: 1px 5px;
+  border: 1px solid #32415b;
+  background: #0b1118;
+  color: #d9e7ff;
+  font-size: 0.95em;
+}
+
+.message-content pre {
+  padding: 12px;
+  border: 1px solid #243044;
+  background: #0b1118;
+}
+
+.message-content pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.message-content a {
+  color: #9db3ff;
+  text-decoration: none;
+}
+
+.message-content a:hover {
+  text-decoration: underline;
+}
+
 .composer {
   display: grid;
   gap: 12px;
@@ -331,6 +398,13 @@ h2 {
   margin-bottom: 12px;
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .result-box {
   border: 1px solid #243044;
   background: #10151d;
@@ -372,6 +446,53 @@ h2 {
   gap: 12px;
 }
 
+.query-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #9eb1cb;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.query-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.result-table-wrap {
+  overflow: auto;
+}
+
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 480px;
+}
+
+.result-table th,
+.result-table td {
+  border-bottom: 1px solid #243044;
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.result-table th {
+  color: #8ea4ff;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.result-table td {
+  color: #d6deea;
+  font-size: 13px;
+  word-break: break-word;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -404,6 +525,123 @@ h2 {
 .recommendation-list {
   display: grid;
   gap: 10px;
+}
+
+.chart-preview {
+  margin-top: 12px;
+  border: 1px solid #243044;
+  background: #0d1219;
+  padding: 12px;
+}
+
+.chart-preview-empty {
+  display: flex;
+  align-items: center;
+  min-height: 80px;
+}
+
+.chart-preview-split {
+  display: grid;
+  grid-template-columns: minmax(0, 160px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.chart-preview-table {
+  padding: 0;
+  overflow: hidden;
+}
+
+.chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.chart-svg line {
+  stroke: #32415b;
+  stroke-width: 1.2;
+}
+
+.chart-svg-pie {
+  max-width: 144px;
+  justify-self: center;
+}
+
+.chart-caption-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chart-caption {
+  color: #9eb1cb;
+  font-size: 11px;
+}
+
+.chart-legend {
+  display: grid;
+  gap: 8px;
+}
+
+.chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #d6deea;
+  font-size: 12px;
+}
+
+.chart-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.chart-table-preview {
+  min-width: 0;
+}
+
+.chart-table-preview th,
+.chart-table-preview td {
+  padding: 8px 10px;
+}
+
+.history-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+}
+
+.history-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #243044;
+  background: #0e131b;
+}
+
+.history-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.history-copy strong {
+  color: #d9e7ff;
+  font-size: 13px;
 }
 
 .recommendation-heading strong {
@@ -495,6 +733,13 @@ pre {
   .workspace-header,
   .composer-footer,
   .tool-footer {
+    display: grid;
+  }
+
+  .query-summary-row,
+  .history-item,
+  .history-header,
+  .chart-preview-split {
     display: grid;
   }
 

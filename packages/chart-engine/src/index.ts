@@ -3,9 +3,17 @@ import {
   type FieldProfile,
   type NumberFieldProfile
 } from "@clusterdata/analysis-service";
-import { AppError } from "@clusterdata/shared";
+import { AppError, createLogger } from "@clusterdata/shared";
 
 export type ChartKind = "line" | "bar" | "pie" | "table" | "histogram" | "scatter";
+export type ChartSamplingStrategy = "none" | "stride" | "top-n-plus-other" | "binned";
+
+const logger = createLogger("chart-engine");
+const DEFAULT_MAX_RENDER_POINTS = 120;
+const DEFAULT_MAX_PIE_SLICES = 8;
+const DEFAULT_ZOOM_THRESHOLD = 24;
+const DEFAULT_PROGRESSIVE_THRESHOLD = 200;
+const DEFAULT_LARGE_SERIES_THRESHOLD = 400;
 
 export interface ChartSuggestionInput {
   readonly dimensions: readonly string[];
@@ -28,15 +36,45 @@ export interface ChartRecommendation {
   readonly option?: EChartsOption;
 }
 
+export interface ChartBuildOptions {
+  readonly maxRenderPoints?: number;
+  readonly maxPieSlices?: number;
+  readonly zoomThreshold?: number;
+  readonly progressiveThreshold?: number;
+  readonly largeSeriesThreshold?: number;
+}
+
+export interface ChartOptimizationMetadata {
+  readonly originalPointCount: number;
+  readonly renderedPointCount: number;
+  readonly sampled: boolean;
+  readonly strategy: ChartSamplingStrategy;
+  readonly interactiveZoom: boolean;
+  readonly progressive: boolean;
+  readonly largeMode: boolean;
+}
+
 export interface EChartsOption {
   readonly title: { readonly text: string };
   readonly tooltip: { readonly trigger: string };
   readonly legend?: { readonly data: readonly string[] };
+  dataZoom?: readonly {
+    readonly type: "inside" | "slider";
+    readonly start: number;
+    readonly end: number;
+  }[];
+  animation?: boolean;
+  meta?: ChartOptimizationMetadata;
   xAxis?: { readonly type: string; readonly data?: readonly string[] };
   yAxis?: { readonly type: string };
   readonly series: readonly {
     readonly type: ChartKind;
     readonly name: string;
+    readonly sampling?: "lttb" | "average";
+    readonly large?: boolean;
+    readonly largeThreshold?: number;
+    readonly progressive?: number;
+    readonly progressiveThreshold?: number;
     readonly data:
       | readonly number[]
       | readonly { readonly name: string; readonly value: number }[]
@@ -64,27 +102,90 @@ export function buildEChartsOption(
   title: string,
   labels: readonly string[],
   values: readonly number[],
-  kind: ChartKind
+  kind: ChartKind,
+  options: ChartBuildOptions = {}
 ): EChartsOption {
+  const config = resolveChartBuildOptions(options);
+  const points = labels.map((label, index) => ({
+    label,
+    value: values[index] ?? 0
+  }));
+
+  if (kind === "pie") {
+    const optimizedPoints = optimizePiePoints(points, config.maxPieSlices);
+    const meta = buildOptimizationMetadata({
+      originalPointCount: points.length,
+      renderedPointCount: optimizedPoints.length,
+      strategy: optimizedPoints.length < points.length ? "top-n-plus-other" : "none",
+      interactiveZoom: false,
+      progressive: false,
+      largeMode: false
+    });
+    const option: EChartsOption = {
+      title: { text: title },
+      tooltip: { trigger: "item" },
+      legend: { data: optimizedPoints.map((point) => point.label) },
+      animation: !meta.progressive,
+      meta,
+      series: [
+        {
+          type: kind,
+          name: title,
+          data: optimizedPoints.map((point) => ({
+            name: point.label,
+            value: point.value
+          }))
+        }
+      ]
+    };
+
+    logChartOptimization(kind, title, meta);
+
+    return option;
+  }
+
+  const optimizedPoints = optimizeCategoryPoints(points, config.maxRenderPoints);
+  const meta = buildOptimizationMetadata({
+    originalPointCount: points.length,
+    renderedPointCount: optimizedPoints.length,
+    strategy: optimizedPoints.length < points.length ? "stride" : "none",
+    interactiveZoom: points.length >= config.zoomThreshold,
+    progressive: points.length >= config.progressiveThreshold,
+    largeMode: kind === "scatter" && points.length >= config.largeSeriesThreshold
+  });
   const option: EChartsOption = {
     title: { text: title },
-    tooltip: { trigger: kind === "pie" ? "item" : "axis" },
+    tooltip: { trigger: "axis" },
+    animation: !meta.progressive,
+    meta,
     series: [
       {
         type: kind,
         name: title,
-        data:
-          kind === "pie"
-            ? labels.map((label, index) => ({ name: label, value: values[index] ?? 0 }))
-            : values
+        data: optimizedPoints.map((point) => point.value),
+        sampling: resolveSeriesSampling(kind, meta),
+        large: meta.largeMode || undefined,
+        largeThreshold: meta.largeMode ? config.largeSeriesThreshold : undefined,
+        progressive: meta.progressive ? 500 : undefined,
+        progressiveThreshold: meta.progressive ? config.progressiveThreshold : undefined
       }
     ]
   };
 
-  if (kind !== "pie") {
-    option.xAxis = { type: "category", data: labels };
-    option.yAxis = { type: "value" };
+  option.xAxis = {
+    type: "category",
+    data: optimizedPoints.map((point) => point.label)
+  };
+  option.yAxis = { type: "value" };
+
+  if (meta.interactiveZoom) {
+    option.dataZoom = [
+      { type: "inside", start: 0, end: 100 },
+      { type: "slider", start: 0, end: 100 }
+    ];
   }
+
+  logChartOptimization(kind, title, meta);
 
   return option;
 }
@@ -181,9 +282,17 @@ export function recommendChartsFromProfile(
     });
   }
 
-  return recommendations
+  const topRecommendations = recommendations
     .sort((left, right) => right.score - left.score || left.title.localeCompare(right.title))
     .slice(0, maxRecommendations);
+
+  logger.info("chart recommendations generated", {
+    rowCount: request.profile.rowCount,
+    fieldCount: request.profile.fieldCount,
+    recommendationCount: topRecommendations.length
+  });
+
+  return topRecommendations;
 }
 
 function buildHistogramOption(metric: NumberFieldProfile): EChartsOption {
@@ -209,19 +318,52 @@ function buildHistogramOption(metric: NumberFieldProfile): EChartsOption {
     values[bucketIndex] += 1;
   }
 
-  return buildEChartsOption(`${metric.name} distribution`, labels, values, "histogram");
+  const option = buildEChartsOption(`${metric.name} distribution`, labels, values, "histogram");
+
+  return {
+    ...option,
+    meta: buildOptimizationMetadata({
+      originalPointCount: metric.count,
+      renderedPointCount: bucketCount,
+      strategy: "binned",
+      interactiveZoom: false,
+      progressive: false,
+      largeMode: false
+    })
+  };
 }
 
 function buildOutlierScatterOption(metric: NumberFieldProfile): EChartsOption {
+  const pointCount = metric.outliers.length;
+  const meta = buildOptimizationMetadata({
+    originalPointCount: pointCount,
+    renderedPointCount: pointCount,
+    strategy: "none",
+    interactiveZoom: pointCount >= DEFAULT_ZOOM_THRESHOLD,
+    progressive: pointCount >= DEFAULT_PROGRESSIVE_THRESHOLD,
+    largeMode: pointCount >= DEFAULT_LARGE_SERIES_THRESHOLD
+  });
   return {
     title: { text: `${metric.name} outliers` },
     tooltip: { trigger: "item" },
+    animation: !meta.progressive,
+    meta,
+    dataZoom: meta.interactiveZoom
+      ? [
+          { type: "inside", start: 0, end: 100 },
+          { type: "slider", start: 0, end: 100 }
+        ]
+      : undefined,
     xAxis: { type: "value" },
     yAxis: { type: "value" },
     series: [
       {
         type: "scatter",
         name: metric.name,
+        large: meta.largeMode || undefined,
+        largeThreshold: meta.largeMode ? DEFAULT_LARGE_SERIES_THRESHOLD : undefined,
+        progressive: meta.progressive ? 500 : undefined,
+        progressiveThreshold: meta.progressive ? DEFAULT_PROGRESSIVE_THRESHOLD : undefined,
         data: metric.outliers.map(
           (outlier): [number, number] => [outlier.index, outlier.value]
         )
@@ -236,4 +378,109 @@ function isNumberField(field: FieldProfile): field is NumberFieldProfile {
 
 function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function resolveChartBuildOptions(options: ChartBuildOptions): Required<ChartBuildOptions> {
+  return {
+    maxRenderPoints: options.maxRenderPoints ?? DEFAULT_MAX_RENDER_POINTS,
+    maxPieSlices: options.maxPieSlices ?? DEFAULT_MAX_PIE_SLICES,
+    zoomThreshold: options.zoomThreshold ?? DEFAULT_ZOOM_THRESHOLD,
+    progressiveThreshold: options.progressiveThreshold ?? DEFAULT_PROGRESSIVE_THRESHOLD,
+    largeSeriesThreshold: options.largeSeriesThreshold ?? DEFAULT_LARGE_SERIES_THRESHOLD
+  };
+}
+
+function optimizeCategoryPoints(
+  points: readonly { readonly label: string; readonly value: number }[],
+  maxRenderPoints: number
+): readonly { readonly label: string; readonly value: number }[] {
+  if (points.length <= maxRenderPoints) {
+    return points;
+  }
+
+  const maxIndex = points.length - 1;
+  const indices = new Set<number>();
+
+  for (let index = 0; index < maxRenderPoints; index += 1) {
+    indices.add(Math.round((index * maxIndex) / Math.max(maxRenderPoints - 1, 1)));
+  }
+
+  return [...indices]
+    .sort((left, right) => left - right)
+    .map((index) => points[index] ?? points[maxIndex]);
+}
+
+function optimizePiePoints(
+  points: readonly { readonly label: string; readonly value: number }[],
+  maxPieSlices: number
+): readonly { readonly label: string; readonly value: number }[] {
+  if (points.length <= maxPieSlices) {
+    return points;
+  }
+
+  const sorted = [...points].sort((left, right) => right.value - left.value);
+  const visibleCount = Math.max(1, maxPieSlices - 1);
+  const visible = sorted.slice(0, visibleCount);
+  const otherValue = sorted
+    .slice(visibleCount)
+    .reduce((sum, point) => sum + point.value, 0);
+
+  return otherValue > 0
+    ? [...visible, { label: "Other", value: Number(otherValue.toFixed(2)) }]
+    : visible;
+}
+
+function buildOptimizationMetadata(input: {
+  readonly originalPointCount: number;
+  readonly renderedPointCount: number;
+  readonly strategy: ChartSamplingStrategy;
+  readonly interactiveZoom: boolean;
+  readonly progressive: boolean;
+  readonly largeMode: boolean;
+}): ChartOptimizationMetadata {
+  return {
+    originalPointCount: input.originalPointCount,
+    renderedPointCount: input.renderedPointCount,
+    sampled: input.renderedPointCount < input.originalPointCount || input.strategy === "binned",
+    strategy: input.strategy,
+    interactiveZoom: input.interactiveZoom,
+    progressive: input.progressive,
+    largeMode: input.largeMode
+  };
+}
+
+function resolveSeriesSampling(
+  kind: ChartKind,
+  meta: ChartOptimizationMetadata
+): "lttb" | "average" | undefined {
+  if (!meta.sampled || meta.strategy === "top-n-plus-other") {
+    return undefined;
+  }
+
+  if (kind === "line" || kind === "scatter") {
+    return "lttb";
+  }
+
+  return "average";
+}
+
+function logChartOptimization(
+  kind: ChartKind,
+  title: string,
+  meta: ChartOptimizationMetadata
+): void {
+  if (!meta.sampled && !meta.interactiveZoom && !meta.progressive && !meta.largeMode) {
+    return;
+  }
+
+  logger.info("chart option optimized", {
+    kind,
+    title,
+    originalPointCount: meta.originalPointCount,
+    renderedPointCount: meta.renderedPointCount,
+    strategy: meta.strategy,
+    interactiveZoom: meta.interactiveZoom,
+    progressive: meta.progressive,
+    largeMode: meta.largeMode
+  });
 }

@@ -37,6 +37,62 @@ export interface DatasetProfile {
   readonly quality: DatasetQualitySummary;
 }
 
+export interface TimeSeriesPoint {
+  readonly timestamp: string;
+  readonly value: number;
+}
+
+export interface TimeSeriesAnalysisRequest {
+  readonly points: readonly TimeSeriesPoint[];
+  readonly movingAverageWindow?: number;
+  readonly anomalyThreshold?: number;
+}
+
+export type TimeSeriesIntervalUnit =
+  | "single"
+  | "minute"
+  | "hour"
+  | "day"
+  | "week"
+  | "month"
+  | "irregular";
+
+export interface TimeSeriesIntervalSummary {
+  readonly unit: TimeSeriesIntervalUnit;
+  readonly regular: boolean;
+  readonly minimumMs: number;
+  readonly maximumMs: number;
+  readonly medianMs: number;
+}
+
+export interface TimeSeriesChangeSummary {
+  readonly absolute: number;
+  readonly percent: number | null;
+  readonly direction: "flat" | "up" | "down";
+}
+
+export interface TimeSeriesMovingAveragePoint {
+  readonly timestamp: string;
+  readonly value: number;
+  readonly average: number;
+}
+
+export interface TimeSeriesAnomaly extends OutlierPoint {
+  readonly timestamp: string;
+}
+
+export interface TimeSeriesAnalysis {
+  readonly pointCount: number;
+  readonly start: string;
+  readonly end: string;
+  readonly summary: SeriesSummary;
+  readonly change: TimeSeriesChangeSummary;
+  readonly interval: TimeSeriesIntervalSummary;
+  readonly movingAverageWindow: number;
+  readonly movingAverage: readonly TimeSeriesMovingAveragePoint[];
+  readonly anomalies: readonly TimeSeriesAnomaly[];
+}
+
 export type FieldProfile =
   | NumberFieldProfile
   | StringFieldProfile
@@ -172,6 +228,70 @@ export function detectOutliers(
   });
 
   return outliers;
+}
+
+export function analyzeTimeSeries(
+  request: TimeSeriesAnalysisRequest
+): TimeSeriesAnalysis {
+  const points = request.points;
+
+  assertNonEmptyTimeSeries(points);
+
+  const movingAverageWindow =
+    typeof request.movingAverageWindow === "undefined"
+      ? Math.min(3, points.length)
+      : request.movingAverageWindow;
+  const anomalyThreshold =
+    request.anomalyThreshold ?? DEFAULT_OUTLIER_THRESHOLD;
+
+  if (!Number.isInteger(movingAverageWindow) || movingAverageWindow <= 0) {
+    throw new AppError(
+      "movingAverageWindow must be a positive integer",
+      "INVALID_MOVING_AVERAGE_WINDOW",
+      400
+    );
+  }
+
+  if (!Number.isFinite(anomalyThreshold) || anomalyThreshold <= 0) {
+    throw new AppError("anomalyThreshold must be positive", "INVALID_THRESHOLD", 400);
+  }
+
+  const sortedPoints = points
+    .map((point) => ({
+      timestamp: toDate(point.timestamp).toISOString(),
+      value: toFiniteNumber(point.value)
+    }))
+    .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
+  const values = sortedPoints.map((point) => point.value);
+  const summary = summarizeSeries(values);
+  const anomalies = detectOutliers(values, anomalyThreshold).map((outlier) => ({
+    ...outlier,
+    timestamp: sortedPoints[outlier.index]?.timestamp ?? sortedPoints[0].timestamp
+  }));
+  const interval = inferTimeSeriesInterval(sortedPoints);
+  const analysis = {
+    pointCount: sortedPoints.length,
+    start: sortedPoints[0].timestamp,
+    end: sortedPoints[sortedPoints.length - 1].timestamp,
+    summary,
+    change: calculateTimeSeriesChange(values),
+    interval,
+    movingAverageWindow,
+    movingAverage: buildMovingAverageSeries(sortedPoints, movingAverageWindow),
+    anomalies
+  } satisfies TimeSeriesAnalysis;
+
+  logger.info("time series analyzed", {
+    pointCount: analysis.pointCount,
+    start: analysis.start,
+    end: analysis.end,
+    movingAverageWindow,
+    anomalyCount: anomalies.length,
+    intervalUnit: interval.unit,
+    intervalRegular: interval.regular
+  });
+
+  return analysis;
 }
 
 export function profileDataset(request: DatasetProfileRequest): DatasetProfile {
@@ -515,8 +635,109 @@ function assertNonEmptySeries(points: readonly number[]): void {
   }
 }
 
+function assertNonEmptyTimeSeries(
+  points: readonly TimeSeriesPoint[]
+): void {
+  if (!Array.isArray(points) || points.length === 0) {
+    throw new AppError("Time series points cannot be empty", "EMPTY_TIME_SERIES", 400);
+  }
+}
+
 function isMissing(value: unknown): boolean {
   return value === null || typeof value === "undefined" || value === "";
+}
+
+function calculateTimeSeriesChange(
+  values: readonly number[]
+): TimeSeriesChangeSummary {
+  const absolute = values[values.length - 1] - values[0];
+  const direction =
+    Math.abs(absolute) < NUMBER_EPSILON ? "flat" : absolute > 0 ? "up" : "down";
+
+  return {
+    absolute,
+    percent:
+      Math.abs(values[0]) < NUMBER_EPSILON ? null : absolute / Math.abs(values[0]),
+    direction
+  };
+}
+
+function inferTimeSeriesInterval(
+  points: readonly TimeSeriesPoint[]
+): TimeSeriesIntervalSummary {
+  if (points.length <= 1) {
+    return {
+      unit: "single",
+      regular: true,
+      minimumMs: 0,
+      maximumMs: 0,
+      medianMs: 0
+    };
+  }
+
+  const intervals = points
+    .slice(1)
+    .map((point, index) => Date.parse(point.timestamp) - Date.parse(points[index].timestamp))
+    .filter((value) => Number.isFinite(value) && value >= 0)
+    .sort((left, right) => left - right);
+  const minimumMs = intervals[0] ?? 0;
+  const maximumMs = intervals[intervals.length - 1] ?? 0;
+  const medianMs = calculateMedian(intervals);
+  const regular =
+    maximumMs - minimumMs <= Math.max(1_000, medianMs * 0.1);
+
+  return {
+    unit: classifyTimeSeriesIntervalUnit(medianMs, regular),
+    regular,
+    minimumMs,
+    maximumMs,
+    medianMs
+  };
+}
+
+function classifyTimeSeriesIntervalUnit(
+  medianMs: number,
+  regular: boolean
+): TimeSeriesIntervalUnit {
+  if (!regular) {
+    return "irregular";
+  }
+
+  if (medianMs < 60 * 60 * 1_000) {
+    return "minute";
+  }
+
+  if (medianMs < 24 * 60 * 60 * 1_000) {
+    return "hour";
+  }
+
+  if (medianMs < 7 * 24 * 60 * 60 * 1_000) {
+    return "day";
+  }
+
+  if (medianMs < 31 * 24 * 60 * 60 * 1_000) {
+    return "week";
+  }
+
+  return "month";
+}
+
+function buildMovingAverageSeries(
+  points: readonly TimeSeriesPoint[],
+  windowSize: number
+): readonly TimeSeriesMovingAveragePoint[] {
+  return points.map((point, index) => {
+    const windowStart = Math.max(0, index - windowSize + 1);
+    const windowValues = points.slice(windowStart, index + 1).map((entry) => entry.value);
+    const average =
+      windowValues.reduce((sum, value) => sum + value, 0) / windowValues.length;
+
+    return {
+      timestamp: point.timestamp,
+      value: point.value,
+      average
+    };
+  });
 }
 
 function stableValueKey(value: unknown): string {

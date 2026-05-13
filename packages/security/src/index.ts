@@ -262,6 +262,67 @@ export function assertSeriesRequestSecurity(
   }
 }
 
+export function assertTimeSeriesRequestSecurity(
+  input: {
+    readonly points?: unknown;
+    readonly movingAverageWindow?: unknown;
+    readonly anomalyThreshold?: unknown;
+  },
+  policy = DEFAULT_REQUEST_SECURITY_POLICY
+): void {
+  if (!Array.isArray(input.points)) {
+    rejectSecurityInput("points must be an array", "INVALID_TIME_SERIES_POINTS");
+  }
+
+  if (input.points.length > policy.maxSeriesPoints) {
+    rejectSecurityInput("Too many time series points", "TIME_SERIES_POINT_LIMIT_EXCEEDED", {
+      count: input.points.length,
+      limit: policy.maxSeriesPoints
+    });
+  }
+
+  for (const point of input.points) {
+    if (!isPlainObject(point)) {
+      rejectSecurityInput("Time series points must be objects", "INVALID_TIME_SERIES_POINT");
+    }
+
+    assertBoundedText(
+      point.timestamp,
+      "timestamp",
+      policy.maxDatasetCellChars,
+      "TIME_SERIES_TIMESTAMP_TOO_LARGE"
+    );
+
+    if (typeof point.value !== "number" || !Number.isFinite(point.value)) {
+      rejectSecurityInput(
+        "Time series point values must be finite numbers",
+        "INVALID_TIME_SERIES_POINT"
+      );
+    }
+  }
+
+  if (typeof input.movingAverageWindow !== "undefined") {
+    assertPositiveIntegerLimit(
+      input.movingAverageWindow,
+      "movingAverageWindow",
+      policy.maxSeriesPoints,
+      "TIME_SERIES_WINDOW_LIMIT_EXCEEDED"
+    );
+  }
+
+  if (
+    typeof input.anomalyThreshold !== "undefined" &&
+    (typeof input.anomalyThreshold !== "number" ||
+      !Number.isFinite(input.anomalyThreshold) ||
+      input.anomalyThreshold <= 0)
+  ) {
+    rejectSecurityInput(
+      "anomalyThreshold must be a positive number",
+      "INVALID_TIME_SERIES_THRESHOLD"
+    );
+  }
+}
+
 export function assertDatasetProfileRequestSecurity(
   input: {
     readonly rows?: unknown;

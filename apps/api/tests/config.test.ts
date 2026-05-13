@@ -15,6 +15,7 @@ describe("api config", () => {
       OPENAI_TIMEOUT_MS: "45000",
       AGENT_MAX_TOOL_CALLS: "8",
       AGENT_MEMORY_LIMIT: "24",
+      AGENT_MEMORY_STORE_PATH: ".codex/data/sessions.json",
       API_MAX_CHAT_MESSAGE_CHARS: "9000",
       API_MAX_DATASET_ROWS: "250",
       API_MAX_SQL_CHARS: "12000"
@@ -30,6 +31,7 @@ describe("api config", () => {
     expect(config.openAiTimeoutMs).toBe(45_000);
     expect(config.agentMaxToolCalls).toBe(8);
     expect(config.agentMemoryLimit).toBe(24);
+    expect(config.agentMemoryStorePath).toBe(".codex/data/sessions.json");
     expect(config.requestSecurity.maxChatMessageChars).toBe(9_000);
     expect(config.requestSecurity.maxDatasetRows).toBe(250);
     expect(config.requestSecurity.maxSqlChars).toBe(12_000);
@@ -43,6 +45,7 @@ describe("api config", () => {
     expect(config.openAiTimeoutMs).toBe(30_000);
     expect(config.metadataSource).toBe("prisma");
     expect(config.postgresSchema).toBe("public");
+    expect(config.agentMemoryStorePath).toBe("");
     expect(config.requestSecurity.maxChatMessageChars).toBe(8_000);
     expect(config.requestSecurity.maxDatasetRows).toBe(1_000);
     expect(config.requestSecurity.maxSqlChars).toBe(20_000);

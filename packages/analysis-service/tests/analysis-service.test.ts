@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "@clusterdata/shared";
-import { detectOutliers, profileDataset, summarizeSeries } from "../src/index.js";
+import {
+  analyzeTimeSeries,
+  detectOutliers,
+  profileDataset,
+  summarizeSeries
+} from "../src/index.js";
 
 describe("analysis-service", () => {
   it("summarizes a series", () => {
@@ -17,6 +22,71 @@ describe("analysis-service", () => {
     const outliers = detectOutliers([1, 1, 1, 10], 1.5);
 
     expect(outliers.length).toBeGreaterThan(0);
+  });
+
+  it("analyzes time series cadence, moving average, and anomalies", () => {
+    const analysis = analyzeTimeSeries({
+      points: [
+        { timestamp: "2026-01-01T00:00:00.000Z", value: 1 },
+        { timestamp: "2026-01-02T00:00:00.000Z", value: 1 },
+        { timestamp: "2026-01-03T00:00:00.000Z", value: 1 },
+        { timestamp: "2026-01-04T00:00:00.000Z", value: 10 }
+      ],
+      movingAverageWindow: 2,
+      anomalyThreshold: 1.5
+    });
+
+    expect(analysis).toMatchObject({
+      pointCount: 4,
+      start: "2026-01-01T00:00:00.000Z",
+      end: "2026-01-04T00:00:00.000Z",
+      movingAverageWindow: 2,
+      interval: {
+        unit: "day",
+        regular: true,
+        minimumMs: 86_400_000,
+        maximumMs: 86_400_000,
+        medianMs: 86_400_000
+      },
+      change: {
+        absolute: 9,
+        percent: 9,
+        direction: "up"
+      },
+      summary: {
+        trend: "rising"
+      }
+    });
+    expect(analysis.movingAverage).toEqual([
+      {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        value: 1,
+        average: 1
+      },
+      {
+        timestamp: "2026-01-02T00:00:00.000Z",
+        value: 1,
+        average: 1
+      },
+      {
+        timestamp: "2026-01-03T00:00:00.000Z",
+        value: 1,
+        average: 1
+      },
+      {
+        timestamp: "2026-01-04T00:00:00.000Z",
+        value: 10,
+        average: 5.5
+      }
+    ]);
+    expect(analysis.anomalies).toEqual([
+      {
+        index: 3,
+        value: 10,
+        score: expect.any(Number),
+        timestamp: "2026-01-04T00:00:00.000Z"
+      }
+    ]);
   });
 
   it("profiles numeric, string, boolean, and date fields", () => {
@@ -112,6 +182,15 @@ describe("analysis-service", () => {
 
   it("rejects empty datasets", () => {
     expect(() => profileDataset({ rows: [] })).toThrow(AppError);
+  });
+
+  it("rejects invalid time series windows", () => {
+    expect(() =>
+      analyzeTimeSeries({
+        points: [{ timestamp: "2026-01-01T00:00:00.000Z", value: 1 }],
+        movingAverageWindow: 0
+      })
+    ).toThrow(AppError);
   });
 });
 

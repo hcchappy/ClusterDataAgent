@@ -5,6 +5,7 @@ import {
   assertChatRequestSecurity,
   assertDatasetProfileRequestSecurity,
   assertSqlRequestSecurity,
+  assertTimeSeriesRequestSecurity,
   authorizeAccess,
   buildRequestSecurityPolicy
 } from "../src/index.js";
@@ -112,6 +113,31 @@ describe("security", () => {
         policy
       )
     ).toThrow("Too many dataset fields");
+  });
+
+  it("guards time series point and window limits", () => {
+    const policy = buildRequestSecurityPolicy({
+      maxSeriesPoints: 1
+    });
+
+    expect(() =>
+      assertTimeSeriesRequestSecurity(
+        {
+          points: [
+            { timestamp: "2026-01-01T00:00:00.000Z", value: 1 },
+            { timestamp: "2026-01-02T00:00:00.000Z", value: 2 }
+          ]
+        },
+        policy
+      )
+    ).toThrow("Too many time series points");
+
+    expect(() =>
+      assertTimeSeriesRequestSecurity({
+        points: [{ timestamp: "2026-01-01T00:00:00.000Z", value: 1 }],
+        movingAverageWindow: 0
+      })
+    ).toThrow("movingAverageWindow must be a positive integer");
   });
 });
 

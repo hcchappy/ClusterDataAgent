@@ -15,6 +15,14 @@ export interface SqlValidationResult {
   readonly limit?: number;
 }
 
+export interface SqlQueryResult {
+  readonly columns: readonly string[];
+  readonly rows: readonly Readonly<Record<string, unknown>>[];
+  readonly rowCount: number;
+  readonly durationMs: number;
+  readonly validation: SqlValidationResult;
+}
+
 export type DatasetRow = Readonly<Record<string, unknown>>;
 
 export type FieldKind = "number" | "string" | "boolean" | "date" | "mixed" | "empty";
@@ -156,6 +164,13 @@ export async function requestJson<T>(
 
 export async function validateSql(sql: string): Promise<SqlValidationResult> {
   return await requestJson<SqlValidationResult>("/api/sql/validate", {
+    method: "POST",
+    body: JSON.stringify({ sql })
+  });
+}
+
+export async function executeSqlQuery(sql: string): Promise<SqlQueryResult> {
+  return await requestJson<SqlQueryResult>("/api/sql/query", {
     method: "POST",
     body: JSON.stringify({ sql })
   });

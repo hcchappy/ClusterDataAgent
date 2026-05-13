@@ -1,8 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppError } from "@clusterdata/shared";
 import { ToolRegistry } from "@clusterdata/tool-system";
 import {
   AgentExecutor,
+  FileSessionStore,
   InMemorySessionStore,
   buildAgentManifest,
   resolveResponsesApiEndpoint,
@@ -254,6 +258,102 @@ describe("agent-core", () => {
     ]);
   });
 
+  it("persists session history to a file-backed session store", async () => {
+    const filePath = createTempSessionStorePath();
+    const registry = new ToolRegistry();
+    const sessionStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+    const transport = createTransport([
+      {
+        id: "resp_file_store",
+        output_text: "Persistent answer",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Persistent answer" }]
+          }
+        ]
+      }
+    ]);
+    const executor = new AgentExecutor({
+      toolRegistry: registry,
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport
+    });
+
+    await executor.executeTurn({
+      sessionId: "persisted",
+      message: "Remember me"
+    });
+
+    const reloadedStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+
+    expect(reloadedStore.get("persisted")).toEqual([
+      { role: "user", content: "Remember me" },
+      { role: "assistant", content: "Persistent answer" }
+    ]);
+
+    cleanupTempSessionStore(filePath);
+  });
+
+  it("trims persisted file-backed session history to the configured cap", () => {
+    const filePath = createTempSessionStorePath();
+    const sessionStore = new FileSessionStore({
+      filePath,
+      maxMessages: 2
+    });
+
+    sessionStore.append("trimmed", [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "one" }
+    ]);
+    sessionStore.append("trimmed", [
+      { role: "user", content: "second" },
+      { role: "assistant", content: "two" }
+    ]);
+
+    const reloadedStore = new FileSessionStore({
+      filePath,
+      maxMessages: 2
+    });
+
+    expect(reloadedStore.get("trimmed")).toEqual([
+      { role: "user", content: "second" },
+      { role: "assistant", content: "two" }
+    ]);
+
+    cleanupTempSessionStore(filePath);
+  });
+
+  it("rejects invalid file-backed session payloads", () => {
+    const filePath = createTempSessionStorePath();
+
+    writeFileSync(filePath, JSON.stringify({ sessions: { bad: [{ role: "system" }] } }), "utf8");
+
+    expect(() =>
+      new FileSessionStore({
+        filePath,
+        maxMessages: 4
+      })
+    ).toThrowError(/Session store file contains invalid messages/);
+
+    cleanupTempSessionStore(filePath);
+  });
+
   it("emits failed stream events when execution errors", async () => {
     const registry = new ToolRegistry();
     const sessionStore = new InMemorySessionStore();
@@ -336,6 +436,124 @@ describe("agent-core", () => {
     expect(deltas.join("")).toBe("This is a streamed answer.");
   });
 
+  it("forwards real upstream stream deltas when the transport supports streaming", async () => {
+    const registry = new ToolRegistry();
+    const sessionStore = new InMemorySessionStore();
+    const createResponse = vi.fn(async () => {
+      throw new Error("createResponse should not be used when streamResponse is available");
+    });
+    const streamResponse = vi.fn(async function* () {
+      yield {
+        type: "response.output_text.delta",
+        delta: "Hello "
+      };
+      yield {
+        type: "response.output_text.delta",
+        delta: "stream"
+      };
+      yield {
+        type: "response.completed",
+        response: {
+          id: "resp_native_stream",
+          output_text: "Hello stream",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Hello stream" }]
+            }
+          ]
+        }
+      };
+    });
+    const executor = new AgentExecutor({
+      toolRegistry: registry,
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: {
+        createResponse,
+        streamResponse
+      }
+    });
+    const deltas: string[] = [];
+
+    for await (const event of executor.streamTurn({
+      sessionId: "stream-native",
+      message: "Hi"
+    })) {
+      if (event.type === "response.output_text.delta") {
+        deltas.push(event.delta);
+      }
+    }
+
+    expect(deltas).toEqual(["Hello ", "stream"]);
+    expect(sessionStore.get("stream-native")).toEqual([
+      { role: "user", content: "Hi" },
+      { role: "assistant", content: "Hello stream" }
+    ]);
+    expect(createResponse).not.toHaveBeenCalled();
+    expect(streamResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a failed stream after partial text has already been emitted", async () => {
+    const registry = new ToolRegistry();
+    const sessionStore = new InMemorySessionStore();
+    const streamResponse = vi.fn(async function* () {
+      yield {
+        type: "response.output_text.delta",
+        delta: "partial"
+      };
+
+      throw new AppError("socket closed", "OPENAI_REQUEST_FAILED", 502);
+    });
+    const executor = new AgentExecutor({
+      toolRegistry: registry,
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 1
+      },
+      transport: {
+        createResponse: vi.fn(async () => {
+          throw new Error("createResponse should not be used when streamResponse is available");
+        }),
+        streamResponse
+      }
+    });
+    const events: string[] = [];
+
+    await expect(
+      (async () => {
+        for await (const event of executor.streamTurn({
+          sessionId: "stream-partial-failure",
+          message: "Hi"
+        })) {
+          events.push(event.type);
+        }
+      })()
+    ).rejects.toMatchObject({
+      code: "OPENAI_REQUEST_FAILED"
+    });
+
+    expect(events).toEqual([
+      "session.started",
+      "response.output_text.delta",
+      "response.failed"
+    ]);
+    expect(streamResponse).toHaveBeenCalledTimes(1);
+  });
+
   it("normalizes base and full response endpoints", () => {
     expect(resolveResponsesApiEndpoint("https://api.openai.com/v1")).toBe(
       "https://api.openai.com/v1/responses"
@@ -363,4 +581,14 @@ function createTransport(responses: readonly object[]): ResponsesTransport {
       return next as never;
     })
   };
+}
+
+function createTempSessionStorePath(): string {
+  const directoryPath = mkdtempSync(join(tmpdir(), "clusterdata-agent-core-"));
+
+  return join(directoryPath, "sessions.json");
+}
+
+function cleanupTempSessionStore(filePath: string): void {
+  rmSync(dirname(filePath), { recursive: true, force: true });
 }

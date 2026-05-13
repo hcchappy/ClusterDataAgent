@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   checkAccess,
+  executeSqlQuery,
   parseSseStream,
   profileDataset,
   recommendCharts,
@@ -66,6 +67,37 @@ describe("web api helpers", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ sql: "select id from Tenant limit 20" })
+      })
+    );
+  });
+
+  it("calls SQL query endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          columns: ["id", "name"],
+          rows: [{ id: "tenant-a", name: "Tenant A" }],
+          rowCount: 1,
+          durationMs: 8,
+          validation: {
+            allowed: true,
+            normalizedSql: "select id, name from Tenant limit 1",
+            referencedTables: ["Tenant"],
+            referencedColumns: ["id", "name"],
+            limit: 1
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    const result = await executeSqlQuery("select id, name from Tenant limit 1");
+
+    expect(result.rowCount).toBe(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:3001/api/sql/query",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ sql: "select id, name from Tenant limit 1" })
       })
     );
   });

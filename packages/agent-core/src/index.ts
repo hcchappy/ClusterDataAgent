@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { z } from "zod";
 import {
   AppError,
@@ -125,17 +127,120 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   public get(sessionId: string): readonly AgentSessionMessage[] {
-    return this.sessions.get(sessionId) ?? [];
+    return cloneSessionMessages(this.sessions.get(sessionId) ?? []);
   }
 
   public append(sessionId: string, messages: readonly AgentSessionMessage[]): void {
-    const next = [...this.get(sessionId), ...messages].slice(-this.maxMessages);
+    const next = [...this.get(sessionId), ...cloneSessionMessages(messages)].slice(
+      -this.maxMessages
+    );
     this.sessions.set(sessionId, next);
+  }
+}
+
+export interface FileSessionStoreOptions {
+  readonly filePath: string;
+  readonly maxMessages?: number;
+  readonly logger?: Logger;
+}
+
+export class FileSessionStore implements SessionStore {
+  private readonly filePath: string;
+  private readonly maxMessages: number;
+  private readonly logger: Logger;
+  private readonly sessions = new Map<string, AgentSessionMessage[]>();
+
+  public constructor(options: FileSessionStoreOptions) {
+    if (!Number.isInteger(options.maxMessages ?? 20) || (options.maxMessages ?? 20) <= 0) {
+      throw new AppError("Memory limit must be a positive integer", "INVALID_MEMORY_LIMIT", 500);
+    }
+
+    this.filePath = options.filePath.trim();
+
+    if (this.filePath.length === 0) {
+      throw new AppError("filePath is required", "SESSION_STORE_PATH_REQUIRED", 500);
+    }
+
+    this.maxMessages = options.maxMessages ?? 20;
+    this.logger = options.logger ?? createLogger("agent-core-session-store");
+    this.loadFromDisk();
+  }
+
+  public get(sessionId: string): readonly AgentSessionMessage[] {
+    return cloneSessionMessages(this.sessions.get(sessionId) ?? []);
+  }
+
+  public append(sessionId: string, messages: readonly AgentSessionMessage[]): void {
+    const next = [...this.get(sessionId), ...cloneSessionMessages(messages)].slice(
+      -this.maxMessages
+    );
+
+    this.sessions.set(sessionId, next);
+    this.persistToDisk();
+  }
+
+  private loadFromDisk(): void {
+    ensureParentDirectory(this.filePath);
+
+    if (!existsSync(this.filePath)) {
+      this.persistToDisk();
+      this.logger.info("session store created", {
+        filePath: this.filePath,
+        sessionCount: 0
+      });
+
+      return;
+    }
+
+    let rawText: string;
+
+    try {
+      rawText = readFileSync(this.filePath, "utf8");
+    } catch (error) {
+      throw new AppError("Session store file could not be read", "SESSION_STORE_READ_FAILED", 500, {
+        filePath: this.filePath,
+        error: safeErrorMessage(error)
+      });
+    }
+
+    const loadedSessions = parsePersistedSessions(rawText, this.filePath);
+
+    for (const [sessionId, messages] of loadedSessions.entries()) {
+      this.sessions.set(sessionId, messages.slice(-this.maxMessages));
+    }
+
+    this.logger.info("session store loaded", {
+      filePath: this.filePath,
+      sessionCount: this.sessions.size
+    });
+  }
+
+  private persistToDisk(): void {
+    try {
+      ensureParentDirectory(this.filePath);
+      writeFileSync(
+        this.filePath,
+        JSON.stringify(buildPersistedSessions(this.sessions), null, 2),
+        "utf8"
+      );
+      this.logger.info("session store persisted", {
+        filePath: this.filePath,
+        sessionCount: this.sessions.size
+      });
+    } catch (error) {
+      throw new AppError("Session store file could not be written", "SESSION_STORE_WRITE_FAILED", 500, {
+        filePath: this.filePath,
+        error: safeErrorMessage(error)
+      });
+    }
   }
 }
 
 export interface ResponsesTransport {
   createResponse(request: OpenAIResponseRequest): Promise<OpenAIResponse>;
+  streamResponse?(
+    request: OpenAIResponseRequest
+  ): AsyncGenerator<OpenAIResponseStreamEvent, void, void>;
 }
 
 export interface AgentExecutorOptions {
@@ -261,24 +366,51 @@ export class AgentExecutor {
     });
 
     while (true) {
-      latestResponse = await this.createResponseWithRetry({
+      let streamedOutputText = "";
+      let latestStreamResponse: OpenAIResponse | undefined;
+
+      for await (const event of this.createResponseEventStreamWithRetry({
         model,
         input: conversation,
         tools: buildToolDefinitions(this.toolRegistry)
-      });
+      })) {
+        if (isOutputTextDeltaStreamEvent(event)) {
+          streamedOutputText += event.delta;
+          yield {
+            type: "response.output_text.delta",
+            sessionId: request.sessionId,
+            delta: event.delta
+          };
+          continue;
+        }
+
+        const completedResponse = extractCompletedStreamResponse(event);
+
+        if (completedResponse) {
+          latestStreamResponse = completedResponse;
+          continue;
+        }
+
+        if (isFailedOpenAIStreamEvent(event)) {
+          throw buildOpenAIStreamEventError(event);
+        }
+      }
+
+      latestResponse = latestStreamResponse;
+
+      if (!latestResponse) {
+        throw new AppError(
+          "OpenAI stream completed without a response payload",
+          "OPENAI_STREAM_MISSING_RESPONSE",
+          502
+        );
+      }
 
       const functionCalls = latestResponse.output.filter(isFunctionCallItem);
 
       if (functionCalls.length === 0) {
-        const outputText = extractOutputText(latestResponse);
-
-        for (const delta of chunkText(outputText)) {
-          yield {
-            type: "response.output_text.delta",
-            sessionId: request.sessionId,
-            delta
-          };
-        }
+        const outputText =
+          streamedOutputText.length > 0 ? streamedOutputText : extractOutputText(latestResponse);
 
         this.sessionStore.append(request.sessionId, [
           {
@@ -385,6 +517,52 @@ export class AgentExecutor {
     }
   }
 
+  private async *createResponseEventStreamWithRetry(
+    request: OpenAIResponseRequest
+  ): AsyncGenerator<OpenAIResponseStreamEvent, void, void> {
+    if (!this.transport.streamResponse) {
+      const response = await this.createResponseWithRetry(request);
+
+      for (const event of buildFallbackResponseEvents(response)) {
+        yield event;
+      }
+
+      return;
+    }
+
+    for (let attempt = 1; attempt <= this.config.maxRetries + 1; attempt += 1) {
+      let emittedEvent = false;
+
+      try {
+        for await (const event of this.transport.streamResponse(request)) {
+          emittedEvent = true;
+          yield event;
+        }
+
+        return;
+      } catch (error) {
+        const appError = normalizeAgentError(error);
+
+        if (
+          !emittedEvent &&
+          attempt <= this.config.maxRetries &&
+          isRetryableOpenAIError(appError)
+        ) {
+          this.logger.warn("agent streaming response retrying", {
+            attempt,
+            code: appError.code,
+            error: appError.message
+          });
+          continue;
+        }
+
+        throw appError;
+      }
+    }
+
+    throw new AppError("OpenAI retries exhausted", "OPENAI_RETRY_EXHAUSTED", 502);
+  }
+
   private async createResponseWithRetry(
     request: OpenAIResponseRequest
   ): Promise<OpenAIResponse> {
@@ -429,6 +607,45 @@ interface OpenAIResponse {
   readonly output_text?: string;
   readonly usage?: OpenAIUsage;
 }
+
+interface OpenAIResponseOutputTextDeltaEvent {
+  readonly type: "response.output_text.delta";
+  readonly delta: string;
+}
+
+interface OpenAIResponseCompletedStreamEvent {
+  readonly type: "response.completed";
+  readonly response: OpenAIResponse;
+}
+
+interface OpenAIResponseFailedStreamEvent {
+  readonly type: "response.failed";
+  readonly error?: {
+    readonly message?: string;
+    readonly code?: string;
+  };
+  readonly response?: {
+    readonly error?: {
+      readonly message?: string;
+      readonly code?: string;
+    };
+  };
+}
+
+interface OpenAIErrorStreamEvent {
+  readonly type: "error";
+  readonly error?: {
+    readonly message?: string;
+    readonly code?: string;
+  };
+}
+
+type OpenAIResponseStreamEvent =
+  | OpenAIResponseOutputTextDeltaEvent
+  | OpenAIResponseCompletedStreamEvent
+  | OpenAIResponseFailedStreamEvent
+  | OpenAIErrorStreamEvent
+  | (Readonly<Record<string, unknown>> & { readonly type: string });
 
 type OpenAIOutputItem =
   | {
@@ -503,38 +720,17 @@ class OpenAIResponsesTransport implements ResponsesTransport {
       const timeoutId = setTimeout(() => controller.abort(), this.requestTimeoutMs);
 
       try {
-        const response = await fetch(this.apiEndpoint, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${this.apiKey}`
-          },
-          body: JSON.stringify({
-            model: request.model,
-            input: request.input,
-            tools: request.tools,
-            tool_choice: "auto"
-          }),
-          signal: controller.signal
-        });
-
-        const payload = (await response.json()) as Partial<OpenAIResponse> & {
-          readonly error?: {
-            readonly message?: string;
-            readonly code?: string;
-          };
-        };
+        const response = await this.sendRequest(request, controller.signal);
+        const payload = (await response.json()) as Partial<OpenAIResponse>;
 
         if (!response.ok) {
-          const errorCode = payload.error?.code ?? "OPENAI_RESPONSE_ERROR";
-          const errorMessage = payload.error?.message ?? "OpenAI request failed";
-          const appError = new AppError(errorMessage, errorCode, response.status);
+          const appError = await buildOpenAIHttpError(response, payload);
 
           if (attempt <= this.maxRetries && isRetryableOpenAIStatus(response.status)) {
             this.logger.warn("openai request retrying", {
               attempt,
               statusCode: response.status,
-              error: errorMessage
+              error: appError.message
             });
             continue;
           }
@@ -544,14 +740,7 @@ class OpenAIResponsesTransport implements ResponsesTransport {
 
         return payload as OpenAIResponse;
       } catch (error) {
-        const normalizedError =
-          error instanceof AppError
-            ? error
-            : error instanceof DOMException && error.name === "AbortError"
-              ? new AppError("OpenAI request timed out", "OPENAI_TIMEOUT", 504)
-              : new AppError("OpenAI request failed", "OPENAI_REQUEST_FAILED", 502, {
-                  error: safeErrorMessage(error)
-                });
+        const normalizedError = normalizeOpenAITransportError(error);
 
         if (attempt <= this.maxRetries && isRetryableOpenAIError(normalizedError)) {
           this.logger.warn("openai transport retrying", {
@@ -570,6 +759,64 @@ class OpenAIResponsesTransport implements ResponsesTransport {
 
     throw new AppError("OpenAI retries exhausted", "OPENAI_RETRY_EXHAUSTED", 502);
   }
+
+  public async *streamResponse(
+    request: OpenAIResponseRequest
+  ): AsyncGenerator<OpenAIResponseStreamEvent, void, void> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+
+    try {
+      const response = await this.sendRequest(
+        request,
+        controller.signal,
+        {
+          accept: "text/event-stream"
+        },
+        true
+      );
+
+      if (!response.ok) {
+        throw await buildOpenAIHttpError(response);
+      }
+
+      if (!response.body) {
+        throw new AppError("OpenAI stream body was empty", "OPENAI_EMPTY_STREAM", 502);
+      }
+
+      for await (const event of parseOpenAIResponseStream(response.body)) {
+        yield event;
+      }
+    } catch (error) {
+      throw normalizeOpenAITransportError(error);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private async sendRequest(
+    request: OpenAIResponseRequest,
+    signal: AbortSignal,
+    extraHeaders?: Readonly<Record<string, string>>,
+    stream = false
+  ): Promise<Response> {
+    return await fetch(this.apiEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.apiKey}`,
+        ...(extraHeaders ?? {})
+      },
+      body: JSON.stringify({
+        model: request.model,
+        input: request.input,
+        tools: request.tools,
+        tool_choice: "auto",
+        stream
+      }),
+      signal
+    });
+  }
 }
 
 function validateTurnRequest(request: AgentTurnRequest): AgentTurnRequest {
@@ -585,6 +832,80 @@ function validateTurnRequest(request: AgentTurnRequest): AgentTurnRequest {
     sessionId: request.sessionId.trim(),
     message: request.message.trim(),
     model: request.model?.trim() || undefined
+  };
+}
+
+function ensureParentDirectory(filePath: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+}
+
+function cloneSessionMessages(
+  messages: readonly AgentSessionMessage[]
+): AgentSessionMessage[] {
+  return messages.map((message) => ({
+    role: message.role,
+    content: message.content
+  }));
+}
+
+function parsePersistedSessions(
+  rawText: string,
+  filePath: string
+): Map<string, AgentSessionMessage[]> {
+  let parsed: unknown;
+
+  try {
+    parsed = rawText.trim().length === 0 ? { sessions: {} } : JSON.parse(rawText);
+  } catch (error) {
+    throw new AppError("Session store file is not valid JSON", "INVALID_SESSION_STORE", 500, {
+      filePath,
+      error: safeErrorMessage(error)
+    });
+  }
+
+  if (!isPlainObject(parsed)) {
+    throw new AppError("Session store file must contain an object", "INVALID_SESSION_STORE", 500, {
+      filePath
+    });
+  }
+
+  const sessions = parsed.sessions;
+
+  if (!isPlainObject(sessions)) {
+    throw new AppError("Session store file must contain a sessions object", "INVALID_SESSION_STORE", 500, {
+      filePath
+    });
+  }
+
+  const loadedSessions = new Map<string, AgentSessionMessage[]>();
+
+  for (const [sessionId, rawMessages] of Object.entries(sessions)) {
+    if (!Array.isArray(rawMessages) || !rawMessages.every(isAgentSessionMessage)) {
+      throw new AppError("Session store file contains invalid messages", "INVALID_SESSION_STORE", 500, {
+        filePath,
+        sessionId
+      });
+    }
+
+    loadedSessions.set(sessionId, cloneSessionMessages(rawMessages));
+  }
+
+  return loadedSessions;
+}
+
+function buildPersistedSessions(
+  sessions: ReadonlyMap<string, readonly AgentSessionMessage[]>
+): {
+  readonly version: 1;
+  readonly sessions: Readonly<Record<string, readonly AgentSessionMessage[]>>;
+} {
+  return {
+    version: 1,
+    sessions: Object.fromEntries(
+      Array.from(sessions.entries())
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([sessionId, messages]) => [sessionId, cloneSessionMessages(messages)])
+    )
   };
 }
 
@@ -692,6 +1013,26 @@ function isFunctionCallItem(
   return item.type === "function_call";
 }
 
+function* buildFallbackResponseEvents(
+  response: OpenAIResponse
+): Generator<OpenAIResponseStreamEvent, void, void> {
+  const functionCalls = response.output.filter(isFunctionCallItem);
+
+  if (functionCalls.length === 0) {
+    for (const delta of chunkText(extractOutputText(response))) {
+      yield {
+        type: "response.output_text.delta",
+        delta
+      };
+    }
+  }
+
+  yield {
+    type: "response.completed",
+    response
+  };
+}
+
 function chunkText(text: string, chunkSize = 80): readonly string[] {
   if (text.length <= chunkSize) {
     return [text];
@@ -712,6 +1053,48 @@ function isCompletedEvent(
   return event.type === "response.completed";
 }
 
+function isOutputTextDeltaStreamEvent(
+  event: OpenAIResponseStreamEvent
+): event is OpenAIResponseOutputTextDeltaEvent {
+  return event.type === "response.output_text.delta" && typeof event.delta === "string";
+}
+
+function extractCompletedStreamResponse(
+  event: OpenAIResponseStreamEvent
+): OpenAIResponse | undefined {
+  if (event.type !== "response.completed") {
+    return undefined;
+  }
+
+  if (isOpenAIResponse((event as OpenAIResponseCompletedStreamEvent).response)) {
+    return (event as OpenAIResponseCompletedStreamEvent).response;
+  }
+
+  if (isOpenAIResponse(event)) {
+    return event;
+  }
+
+  throw new AppError(
+    "OpenAI stream completed with an invalid response payload",
+    "INVALID_OPENAI_STREAM_RESPONSE",
+    502
+  );
+}
+
+function isFailedOpenAIStreamEvent(
+  event: OpenAIResponseStreamEvent
+): event is OpenAIResponseFailedStreamEvent | OpenAIErrorStreamEvent {
+  return event.type === "response.failed" || event.type === "error";
+}
+
+function buildOpenAIStreamEventError(event: OpenAIResponseFailedStreamEvent | OpenAIErrorStreamEvent): AppError {
+  const details = extractOpenAIStreamErrorDetails(event);
+
+  return new AppError(details.message, details.code, 502, {
+    eventType: event.type
+  });
+}
+
 function isRetryableOpenAIStatus(statusCode: number): boolean {
   return statusCode === 408 || statusCode === 409 || statusCode === 429 || statusCode >= 500;
 }
@@ -728,6 +1111,244 @@ function normalizeAgentError(error: unknown): AppError {
   return new AppError("Agent execution failed", "AGENT_EXECUTION_FAILED", 500, {
     error: safeErrorMessage(error)
   });
+}
+
+function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAgentSessionMessage(value: unknown): value is AgentSessionMessage {
+  return (
+    isPlainObject(value) &&
+    (value.role === "user" || value.role === "assistant") &&
+    typeof value.content === "string"
+  );
+}
+
+function isOpenAIResponse(value: unknown): value is OpenAIResponse {
+  return (
+    isPlainObject(value) &&
+    typeof value.id === "string" &&
+    Array.isArray(value.output)
+  );
+}
+
+async function buildOpenAIHttpError(
+  response: Response,
+  payload?: Partial<OpenAIResponse>
+): Promise<AppError> {
+  const errorPayload =
+    payload && isPlainObject(payload) ? payload : await parseOpenAIErrorPayload(response);
+  const errorDetails = extractOpenAIErrorDetails(errorPayload);
+
+  return new AppError(
+    errorDetails.message,
+    errorDetails.code,
+    response.status
+  );
+}
+
+async function parseOpenAIErrorPayload(
+  response: Response
+): Promise<Readonly<Record<string, unknown>> | undefined> {
+  const responseText = await response.text();
+
+  if (responseText.trim().length === 0) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(responseText) as unknown;
+    return isPlainObject(parsed) ? parsed : undefined;
+  } catch {
+    return {
+      error: {
+        message: responseText
+      }
+    };
+  }
+}
+
+function extractOpenAIErrorDetails(
+  payload: unknown
+): {
+  readonly message: string;
+  readonly code: string;
+} {
+  if (!isPlainObject(payload)) {
+    return {
+      message: "OpenAI request failed",
+      code: "OPENAI_RESPONSE_ERROR"
+    };
+  }
+
+  const nestedError = isPlainObject(payload.error) ? payload.error : undefined;
+  const message =
+    (typeof nestedError?.message === "string" && nestedError.message.trim().length > 0
+      ? nestedError.message
+      : typeof payload.message === "string" && payload.message.trim().length > 0
+        ? payload.message
+        : "OpenAI request failed");
+  const code =
+    (typeof nestedError?.code === "string" && nestedError.code.trim().length > 0
+      ? nestedError.code
+      : typeof payload.code === "string" && payload.code.trim().length > 0
+        ? payload.code
+        : "OPENAI_RESPONSE_ERROR");
+
+  return {
+    message,
+    code
+  };
+}
+
+function extractOpenAIStreamErrorDetails(
+  payload: unknown
+): {
+  readonly message: string;
+  readonly code: string;
+} {
+  if (!isPlainObject(payload)) {
+    return {
+      message: "OpenAI streaming request failed",
+      code: "OPENAI_STREAM_ERROR"
+    };
+  }
+
+  const directError = isPlainObject(payload.error) ? payload.error : undefined;
+  const nestedResponse = isPlainObject(payload.response) ? payload.response : undefined;
+  const nestedError = isPlainObject(nestedResponse?.error) ? nestedResponse.error : undefined;
+  const error = directError ?? nestedError;
+  const message =
+    typeof error?.message === "string" && error.message.trim().length > 0
+      ? error.message
+      : "OpenAI streaming request failed";
+  const code =
+    typeof error?.code === "string" && error.code.trim().length > 0
+      ? error.code
+      : "OPENAI_STREAM_ERROR";
+
+  return {
+    message,
+    code
+  };
+}
+
+function normalizeOpenAITransportError(error: unknown): AppError {
+  if (error instanceof AppError) {
+    return error;
+  }
+
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return new AppError("OpenAI request timed out", "OPENAI_TIMEOUT", 504);
+  }
+
+  return new AppError("OpenAI request failed", "OPENAI_REQUEST_FAILED", 502, {
+    error: safeErrorMessage(error)
+  });
+}
+
+async function* parseOpenAIResponseStream(
+  stream: ReadableStream<Uint8Array>
+): AsyncGenerator<OpenAIResponseStreamEvent, void, void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r/g, "");
+
+      while (true) {
+        const boundaryIndex = buffer.indexOf("\n\n");
+
+        if (boundaryIndex === -1) {
+          break;
+        }
+
+        const chunk = buffer.slice(0, boundaryIndex).trim();
+        buffer = buffer.slice(boundaryIndex + 2);
+
+        if (chunk.length === 0) {
+          continue;
+        }
+
+        const event = parseOpenAIStreamChunk(chunk);
+
+        if (event) {
+          yield event;
+        }
+      }
+    }
+
+    const trailing = buffer.trim();
+
+    if (trailing.length > 0) {
+      const event = parseOpenAIStreamChunk(trailing);
+
+      if (event) {
+        yield event;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseOpenAIStreamChunk(chunk: string): OpenAIResponseStreamEvent | undefined {
+  const lines = chunk.split("\n");
+  const eventName = lines
+    .find((line) => line.startsWith("event:"))
+    ?.slice(6)
+    .trim();
+  const dataLines = lines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => (line[5] === " " ? line.slice(6) : line.slice(5)));
+
+  if (dataLines.length === 0) {
+    throw new AppError("Malformed OpenAI SSE payload", "INVALID_OPENAI_STREAM_EVENT", 502, {
+      chunk
+    });
+  }
+
+  const rawData = dataLines.join("\n").trim();
+
+  if (rawData === "[DONE]") {
+    return undefined;
+  }
+
+  let payload: unknown;
+
+  try {
+    payload = JSON.parse(rawData);
+  } catch (error) {
+    throw new AppError("Invalid JSON in OpenAI SSE payload", "INVALID_OPENAI_STREAM_EVENT", 502, {
+      chunk,
+      error: safeErrorMessage(error)
+    });
+  }
+
+  if (!isPlainObject(payload) || typeof payload.type !== "string") {
+    throw new AppError("OpenAI SSE payload is missing a type", "INVALID_OPENAI_STREAM_EVENT", 502, {
+      chunk
+    });
+  }
+
+  if (eventName && payload.type !== eventName) {
+    throw new AppError("OpenAI SSE event type mismatch", "INVALID_OPENAI_STREAM_EVENT", 502, {
+      eventName,
+      payloadType: payload.type
+    });
+  }
+
+  return payload as OpenAIResponseStreamEvent;
 }
 
 export function resolveResponsesApiEndpoint(endpoint: string): string {

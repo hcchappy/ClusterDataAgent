@@ -4,21 +4,29 @@ import cors from "@fastify/cors";
 import fastify, { type FastifyInstance } from "fastify";
 import {
   AgentExecutor,
+  FileSessionStore,
   InMemorySessionStore,
   buildAgentManifest,
-  type AgentTurnRequest
+  type AgentTurnRequest,
+  type SessionStore
 } from "@clusterdata/agent-core";
 import {
+  analyzeTimeSeries,
   profileDataset,
   summarizeSeries,
-  type DatasetRow
+  type DatasetRow,
+  type TimeSeriesPoint
 } from "@clusterdata/analysis-service";
 import {
   buildEChartsOption,
   chooseChartKind,
   recommendChartsFromProfile
 } from "@clusterdata/chart-engine";
-import { summarizeDatabaseConfig } from "@clusterdata/database";
+import {
+  PostgresReadOnlyQueryExecutor,
+  summarizeDatabaseConfig,
+  type ReadOnlyQueryExecutor
+} from "@clusterdata/database";
 import {
   InMemoryMetadataCache,
   PrismaMetadataCatalogService,
@@ -35,6 +43,7 @@ import {
   assertSeriesRequestSecurity,
   assertSqlRequestSecurity,
   assertSqlSuggestionRequestSecurity,
+  assertTimeSeriesRequestSecurity,
   authorizeAccess,
   buildRequestSecurityPolicy
 } from "@clusterdata/security";
@@ -53,6 +62,8 @@ const DEFAULT_SQL_LIMIT = 500;
 
 export interface BuildApiOptions {
   readonly agentExecutor?: AgentExecutor;
+  readonly queryExecutor?: ReadOnlyQueryExecutor;
+  readonly sessionStore?: SessionStore;
   readonly toolRegistry?: ToolRegistry;
   readonly metadataCatalog?: PrismaSchemaCatalog;
   readonly metadataService?: PrismaMetadataCatalogService;
@@ -82,9 +93,10 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       logger,
       options.metadataCatalogLoader
     ));
+  const queryExecutor = options.queryExecutor ?? createQueryExecutor(config, logger);
   const toolRegistry =
-    options.toolRegistry ?? buildToolRegistry(() => metadataCatalog);
-  const sessionStore = new InMemorySessionStore(config.agentMemoryLimit);
+    options.toolRegistry ?? buildToolRegistry(() => metadataCatalog, queryExecutor);
+  const sessionStore = options.sessionStore ?? createSessionStore(config, logger);
   const agentExecutor =
     options.agentExecutor ??
     (config.openAiApiKey.trim().length > 0
@@ -178,6 +190,11 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
         endpoint: config.openAiEndpoint,
         defaultModel: config.openAiModel,
         memoryLimit: config.agentMemoryLimit,
+        memoryStore: getSessionStoreMode(config),
+        memoryStorePath:
+          config.agentMemoryStorePath.trim().length > 0
+            ? config.agentMemoryStorePath
+            : undefined,
         maxToolCalls: config.agentMaxToolCalls,
         streaming: true
       },
@@ -428,6 +445,33 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     return result;
   });
 
+  app.post("/api/sql/query", async (request) => {
+    const body = request.body as { sql?: string };
+
+    if (typeof body?.sql !== "string") {
+      throw new AppError("sql is required", "SQL_REQUIRED", 400);
+    }
+
+    assertSqlRequestSecurity(body, requestSecurityPolicy);
+
+    const result = await executeValidatedSqlQuery(
+      body.sql,
+      metadataCatalog,
+      getReadOnlyQueryExecutor(queryExecutor)
+    );
+
+    app.log.info(
+      {
+        rowCount: result.rowCount,
+        columnCount: result.columns.length,
+        durationMs: result.durationMs
+      },
+      "sql query executed"
+    );
+
+    return result;
+  });
+
   app.post("/api/sql/limit", async (request) => {
     const body = request.body as { limit?: number };
 
@@ -488,6 +532,40 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
 
     return {
       summary: summarizeSeries(body.points)
+    };
+  });
+
+  app.post("/api/analysis/time-series", async (request) => {
+    const body = request.body as {
+      points?: readonly TimeSeriesPoint[];
+      movingAverageWindow?: number;
+      anomalyThreshold?: number;
+    };
+
+    if (!Array.isArray(body?.points)) {
+      throw new AppError("points are required", "POINTS_REQUIRED", 400);
+    }
+
+    assertTimeSeriesRequestSecurity(body, requestSecurityPolicy);
+
+    const analysis = analyzeTimeSeries({
+      points: body.points,
+      movingAverageWindow: body.movingAverageWindow,
+      anomalyThreshold: body.anomalyThreshold
+    });
+
+    app.log.info(
+      {
+        pointCount: analysis.pointCount,
+        anomalyCount: analysis.anomalies.length,
+        movingAverageWindow: analysis.movingAverageWindow,
+        intervalUnit: analysis.interval.unit
+      },
+      "time series analysis generated"
+    );
+
+    return {
+      analysis
     };
   });
 
@@ -619,6 +697,7 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
 
 function buildToolRegistry(
   getMetadataCatalog: () => PrismaSchemaCatalog,
+  queryExecutor?: ReadOnlyQueryExecutor,
   options: ToolRegistryOptions = {}
 ): ToolRegistry {
   const toolRegistry = new ToolRegistry(options);
@@ -683,6 +762,27 @@ function buildToolRegistry(
       )
   });
 
+  if (queryExecutor) {
+    toolRegistry.register({
+      name: "query-sql",
+      description: "Execute a validated read-only SQL statement and return rows",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sql: { type: "string" }
+        },
+        required: ["sql"],
+        additionalProperties: false
+      },
+      execution: {
+        timeoutMs: 15_000,
+        retries: 0
+      },
+      execute: async (input: { sql: string }) =>
+        await executeValidatedSqlQuery(input.sql, getMetadataCatalog(), queryExecutor)
+    });
+  }
+
   toolRegistry.register({
     name: "summarize-series",
     description: "Summarize a numeric series",
@@ -736,6 +836,46 @@ function buildToolRegistry(
         rows: input.rows,
         maxCategoryValues: input.maxCategoryValues,
         outlierThreshold: input.outlierThreshold
+      })
+  });
+
+  toolRegistry.register({
+    name: "analyze-time-series",
+    description: "Analyze time series points for trend, cadence, moving average, and anomalies",
+    inputSchema: {
+      type: "object",
+      properties: {
+        points: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              timestamp: { type: "string" },
+              value: { type: "number" }
+            },
+            required: ["timestamp", "value"],
+            additionalProperties: false
+          }
+        },
+        movingAverageWindow: { type: "integer" },
+        anomalyThreshold: { type: "number" }
+      },
+      required: ["points"],
+      additionalProperties: false
+    },
+    execution: {
+      timeoutMs: 2_000,
+      retries: 0
+    },
+    execute: (input: {
+      points: readonly TimeSeriesPoint[];
+      movingAverageWindow?: number;
+      anomalyThreshold?: number;
+    }) =>
+      analyzeTimeSeries({
+        points: input.points,
+        movingAverageWindow: input.movingAverageWindow,
+        anomalyThreshold: input.anomalyThreshold
       })
   });
 
@@ -844,6 +984,96 @@ function buildToolRegistry(
   });
 
   return toolRegistry;
+}
+
+function createQueryExecutor(
+  config: ApiConfig,
+  logger: ReturnType<typeof createLogger>
+): ReadOnlyQueryExecutor | undefined {
+  if (config.databaseUrl.trim().length === 0) {
+    return undefined;
+  }
+
+  logger.info("using postgres read-only query executor", {
+    host: config.host
+  });
+
+  return new PostgresReadOnlyQueryExecutor({
+    databaseUrl: config.databaseUrl,
+    logger
+  });
+}
+
+function createSessionStore(
+  config: ApiConfig,
+  logger: ReturnType<typeof createLogger>
+): SessionStore {
+  if (getSessionStoreMode(config) === "file") {
+    logger.info("using file-backed agent session store", {
+      filePath: config.agentMemoryStorePath,
+      memoryLimit: config.agentMemoryLimit
+    });
+
+    return new FileSessionStore({
+      filePath: config.agentMemoryStorePath,
+      maxMessages: config.agentMemoryLimit,
+      logger
+    });
+  }
+
+  logger.info("using in-memory agent session store", {
+    memoryLimit: config.agentMemoryLimit
+  });
+
+  return new InMemorySessionStore(config.agentMemoryLimit);
+}
+
+function getSessionStoreMode(config: ApiConfig): "memory" | "file" {
+  return config.agentMemoryStorePath.trim().length > 0 ? "file" : "memory";
+}
+
+function getReadOnlyQueryExecutor(
+  queryExecutor?: ReadOnlyQueryExecutor
+): ReadOnlyQueryExecutor {
+  if (!queryExecutor) {
+    throw new AppError(
+      "Database query execution is not configured. Set DATABASE_URL to enable SQL query execution.",
+      "DATABASE_QUERY_NOT_CONFIGURED",
+      503
+    );
+  }
+
+  return queryExecutor;
+}
+
+async function executeValidatedSqlQuery(
+  sql: string,
+  metadataCatalog: PrismaSchemaCatalog,
+  queryExecutor: ReadOnlyQueryExecutor
+): Promise<{
+  readonly columns: readonly string[];
+  readonly rows: readonly Readonly<Record<string, unknown>>[];
+  readonly rowCount: number;
+  readonly durationMs: number;
+  readonly validation: ReturnType<typeof validateSqlStatement>;
+}> {
+  const validation = validateSqlStatement(sql, {
+    tables: metadataCatalog.tables,
+    maxLimit: DEFAULT_SQL_LIMIT
+  });
+
+  if (!validation.allowed) {
+    throw new AppError(validation.reason ?? "SQL is not allowed", "SQL_NOT_ALLOWED", 400, {
+      validation
+    });
+  }
+
+  const result = await queryExecutor.executeReadOnlyQuery(validation.normalizedSql);
+
+  return {
+    ...result,
+    validation
+  };
 }
 
 async function loadConfiguredMetadataCatalog(

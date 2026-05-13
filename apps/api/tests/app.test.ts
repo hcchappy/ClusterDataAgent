@@ -1,6 +1,10 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "@clusterdata/shared";
 import { ToolRegistry } from "@clusterdata/tool-system";
+import { type ReadOnlyQueryExecutor } from "@clusterdata/database";
 import {
   PrismaMetadataCatalogService,
   type PrismaSchemaCatalog
@@ -236,6 +240,48 @@ describe("api", () => {
     await app.close();
   });
 
+  it("analyzes time series through the API", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/analysis/time-series",
+      payload: {
+        points: [
+          { timestamp: "2026-01-01T00:00:00.000Z", value: 1 },
+          { timestamp: "2026-01-02T00:00:00.000Z", value: 1 },
+          { timestamp: "2026-01-03T00:00:00.000Z", value: 1 },
+          { timestamp: "2026-01-04T00:00:00.000Z", value: 10 }
+        ],
+        movingAverageWindow: 2,
+        anomalyThreshold: 1.5
+      }
+    });
+    const payload = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(payload.analysis).toMatchObject({
+      pointCount: 4,
+      movingAverageWindow: 2,
+      interval: {
+        unit: "day",
+        regular: true
+      },
+      change: {
+        absolute: 9,
+        direction: "up"
+      }
+    });
+    expect(payload.analysis.anomalies).toEqual([
+      expect.objectContaining({
+        index: 3,
+        value: 10,
+        timestamp: "2026-01-04T00:00:00.000Z"
+      })
+    ]);
+
+    await app.close();
+  });
+
   it("rejects oversized analysis profile requests", async () => {
     vi.stubEnv("API_MAX_DATASET_ROWS", "1");
 
@@ -306,6 +352,39 @@ describe("api", () => {
         title: { text: "Revenue" }
       }
     });
+
+    await app.close();
+  });
+
+  it("optimizes large legacy chart suggestions", async () => {
+    const app = await buildApi();
+    const labels = Array.from({ length: 240 }, (_unused, index) => `Day ${index + 1}`);
+    const values = labels.map((_label, index) => index + 1);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/charts/suggest",
+      payload: {
+        title: "Revenue",
+        labels,
+        values,
+        hasTimeAxis: true
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      kind: "line",
+      option: {
+        meta: {
+          originalPointCount: 240,
+          sampled: true,
+          strategy: "stride",
+          interactiveZoom: true,
+          progressive: true
+        }
+      }
+    });
+    expect(response.json().option.xAxis.data.length).toBeLessThanOrEqual(120);
 
     await app.close();
   });
@@ -752,6 +831,144 @@ describe("api", () => {
 
     await app.close();
   });
+
+  it("rejects oversized time series analysis requests", async () => {
+    vi.stubEnv("API_MAX_SERIES_POINTS", "1");
+
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/analysis/time-series",
+      payload: {
+        points: [
+          { timestamp: "2026-01-01T00:00:00.000Z", value: 1 },
+          { timestamp: "2026-01-02T00:00:00.000Z", value: 2 }
+        ]
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe("TIME_SERIES_POINT_LIMIT_EXCEEDED");
+
+    await app.close();
+  });
+
+  it("executes validated SQL queries through the API", async () => {
+    const queryExecutor = createQueryExecutor({
+      columns: ["id", "name"],
+      rows: [
+        { id: "tenant-a", name: "Tenant A" },
+        { id: "tenant-b", name: "Tenant B" }
+      ],
+      rowCount: 2,
+      durationMs: 12
+    });
+    const app = await buildApi({
+      metadataCatalog: createCatalogWithTables([
+        {
+          name: "Tenant",
+          columns: [
+            { name: "id", dataType: "String" },
+            { name: "name", dataType: "String" }
+          ]
+        }
+      ]),
+      queryExecutor
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/sql/query",
+      payload: {
+        sql: "select id, name from Tenant limit 2"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      columns: ["id", "name"],
+      rows: [
+        { id: "tenant-a", name: "Tenant A" },
+        { id: "tenant-b", name: "Tenant B" }
+      ],
+      rowCount: 2,
+      durationMs: 12,
+      validation: {
+        allowed: true,
+        normalizedSql: "select id, name from Tenant limit 2",
+        referencedTables: ["Tenant"],
+        referencedColumns: ["id", "name"],
+        limit: 2
+      }
+    });
+
+    await app.close();
+  });
+
+  it("rejects unsafe SQL query execution requests", async () => {
+    const app = await buildApi({
+      queryExecutor: createQueryExecutor({
+        columns: [],
+        rows: [],
+        rowCount: 0,
+        durationMs: 5
+      })
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/sql/query",
+      payload: {
+        sql: "delete from Tenant"
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe("SQL_NOT_ALLOWED");
+
+    await app.close();
+  });
+
+  it("reports unavailable SQL query execution when no database is configured", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/sql/query",
+      payload: {
+        sql: "select id from Tenant limit 1"
+      }
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().code).toBe("DATABASE_QUERY_NOT_CONFIGURED");
+
+    await app.close();
+  });
+
+  it("reports file-backed agent memory when configured", async () => {
+    const directoryPath = mkdtempSync(join(tmpdir(), "clusterdata-api-"));
+    const sessionStorePath = join(directoryPath, "sessions.json");
+
+    vi.stubEnv("AGENT_MEMORY_STORE_PATH", sessionStorePath);
+
+    try {
+      const app = await buildApi();
+      const response = await app.inject({ method: "GET", url: "/api/overview" });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().agent).toMatchObject({
+        memoryStore: "file",
+        memoryStorePath: sessionStorePath
+      });
+      expect(existsSync(sessionStorePath)).toBe(true);
+      expect(JSON.parse(readFileSync(sessionStorePath, "utf8"))).toEqual({
+        version: 1,
+        sessions: {}
+      });
+
+      await app.close();
+    } finally {
+      rmSync(directoryPath, { recursive: true, force: true });
+    }
+  });
 });
 
 function createAgentExecutor(responses: readonly object[]): AgentExecutor {
@@ -808,6 +1025,14 @@ function createTransport(responses: readonly object[]): ResponsesTransport {
 
       return next as never;
     })
+  };
+}
+
+function createQueryExecutor(
+  result: Awaited<ReturnType<ReadOnlyQueryExecutor["executeReadOnlyQuery"]>>
+): ReadOnlyQueryExecutor {
+  return {
+    executeReadOnlyQuery: vi.fn(async () => result)
   };
 }
 
