@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { renderToString } from "react-dom/server";
-import { AppShell } from "../src/App.js";
+import App, { AppShell } from "../src/App.js";
 
 describe("web app", () => {
+  it("defaults to the Chinese workbench", () => {
+    const html = renderToString(<App />);
+
+    expect(html).toContain("ChatBI 工作台");
+    expect(html).toContain("工作台");
+    expect(html).toContain("文档");
+    expect(html).toContain("语言");
+  });
+
   it("renders the chat workspace and tool activity", () => {
     const html = renderToString(
       <AppShell
+        language="en"
+        activeView="workbench"
         overview={{
           ok: true,
           manifest: {
@@ -197,6 +208,8 @@ describe("web app", () => {
         onRecommendCharts={() => {}}
         onSecurityCheckChange={() => {}}
         onCheckAccess={() => {}}
+        onLanguageChange={() => {}}
+        onViewChange={() => {}}
       />
     );
 
@@ -220,5 +233,132 @@ describe("web app", () => {
     expect(html).toContain("Input Limit");
     expect(html).toContain("1000");
     expect(html).toContain("Send");
+  });
+
+  it("renders the Chinese workbench copy", () => {
+    const html = renderToString(
+      <AppShell
+        language="zh"
+        activeView="workbench"
+        overview={null}
+        messages={[
+          {
+            id: "welcome",
+            role: "assistant",
+            content: "Agent core 已上线。",
+            status: "complete"
+          }
+        ]}
+        toolActivity={[]}
+        composerValue=""
+        isStreaming={false}
+        errorMessage={null}
+        statusText="已连接 Agent API"
+        onComposerChange={() => {}}
+        onSend={() => {}}
+        onPromptSelect={() => {}}
+        sqlValue="select id from Tenant limit 20"
+        sqlResult={null}
+        isValidatingSql={false}
+        sqlQueryResult={null}
+        sqlHistory={[]}
+        isRunningSql={false}
+        onSqlChange={() => {}}
+        onValidateSql={() => {}}
+        onRunSql={() => {}}
+        onReuseSqlHistory={() => {}}
+        onExportSqlResult={() => {}}
+        onClearSqlHistory={() => {}}
+        datasetValue="[]"
+        datasetRows={[]}
+        datasetProfile={null}
+        chartRecommendations={[]}
+        isProfilingDataset={false}
+        isRecommendingCharts={false}
+        securityCheck={{
+          role: "analyst",
+          tenantId: "tenant-a",
+          resourceTenantId: "tenant-a",
+          action: "read"
+        }}
+        securityDecision={null}
+        isCheckingAccess={false}
+        onDatasetChange={() => {}}
+        onProfileDataset={() => {}}
+        onRecommendCharts={() => {}}
+        onSecurityCheckChange={() => {}}
+        onCheckAccess={() => {}}
+        onLanguageChange={() => {}}
+        onViewChange={() => {}}
+      />
+    );
+
+    expect(html).toContain("ChatBI 工作台");
+    expect(html).toContain("工作台");
+    expect(html).toContain("文档");
+    expect(html).toContain("对话");
+    expect(html).toContain("SQL 护栏");
+    expect(html).toContain("访问检查");
+    expect(html).toContain("数据集画像");
+    expect(html).toContain("推荐图表");
+  });
+
+  it("renders the documentation page with tutorials and flow source", () => {
+    const html = renderToString(
+      <AppShell
+        language="zh"
+        activeView="docs"
+        overview={null}
+        messages={[]}
+        toolActivity={[]}
+        composerValue=""
+        isStreaming={false}
+        errorMessage={null}
+        statusText="已连接 Agent API"
+        onComposerChange={() => {}}
+        onSend={() => {}}
+        onPromptSelect={() => {}}
+        sqlValue=""
+        sqlResult={null}
+        isValidatingSql={false}
+        sqlQueryResult={null}
+        sqlHistory={[]}
+        isRunningSql={false}
+        onSqlChange={() => {}}
+        onValidateSql={() => {}}
+        onRunSql={() => {}}
+        onReuseSqlHistory={() => {}}
+        onExportSqlResult={() => {}}
+        onClearSqlHistory={() => {}}
+        datasetValue="[]"
+        datasetRows={[]}
+        datasetProfile={null}
+        chartRecommendations={[]}
+        isProfilingDataset={false}
+        isRecommendingCharts={false}
+        securityCheck={{
+          role: "analyst",
+          tenantId: "tenant-a",
+          resourceTenantId: "tenant-a",
+          action: "read"
+        }}
+        securityDecision={null}
+        isCheckingAccess={false}
+        onDatasetChange={() => {}}
+        onProfileDataset={() => {}}
+        onRecommendCharts={() => {}}
+        onSecurityCheckChange={() => {}}
+        onCheckAccess={() => {}}
+        onLanguageChange={() => {}}
+        onViewChange={() => {}}
+      />
+    );
+
+    expect(html).toContain("使用文档");
+    expect(html).toContain("使用教程");
+    expect(html).toContain("接口调用教程");
+    expect(html).toContain("流程图");
+    expect(html).toContain("flowchart LR");
+    expect(html).toContain("/api/chat/stream");
   });
 });

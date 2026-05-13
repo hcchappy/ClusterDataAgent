@@ -148,6 +148,26 @@ describe("sql-agent", () => {
     expect(result.reason).toContain("must include a LIMIT");
   });
 
+  it("allows aggregate count queries without a limit because they return one row", () => {
+    const result = validateSqlStatement(
+      "select count(*) as count from cda_orders",
+      postgresMetadataContext
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.referencedTables).toEqual(["cda_orders"]);
+  });
+
+  it("still requires a limit for grouped aggregate queries", () => {
+    const result = validateSqlStatement(
+      "select status, count(*) as count from cda_orders group by status",
+      postgresMetadataContext
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("must include a LIMIT");
+  });
+
   it("can disable the default limit requirement", () => {
     const result = validateSqlStatement("select id from Tenant", {
       ...metadataContext,

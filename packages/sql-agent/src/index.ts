@@ -200,7 +200,11 @@ export function validateSqlStatement(
   const limit = extractAstLimit(ast);
   const maxLimit = context?.maxLimit ?? DEFAULT_METADATA_LIMIT;
 
-  if (typeof limit === "undefined" && (context?.requireLimit ?? Boolean(context))) {
+  if (
+    typeof limit === "undefined" &&
+    (context?.requireLimit ?? Boolean(context)) &&
+    !isImplicitlySingleRowSelect(ast)
+  ) {
     return rejectSql({
       normalizedSql,
       reason: "SELECT queries must include a LIMIT",
@@ -618,6 +622,44 @@ function extractAstLimit(select: Select): number | undefined {
   }
 
   return limitValues.at(-1);
+}
+
+function isImplicitlySingleRowSelect(select: Select): boolean {
+  if (normalizeGroupBy(select.groupby).length > 0) {
+    return false;
+  }
+
+  const columns = normalizeColumns(select.columns);
+
+  if (columns.length === 0) {
+    return false;
+  }
+
+  return columns.every(isAggregateProjection);
+}
+
+function normalizeGroupBy(groupBy: Select["groupby"]): readonly unknown[] {
+  if (!groupBy) {
+    return [];
+  }
+
+  return Array.isArray(groupBy) ? groupBy : [groupBy];
+}
+
+function isAggregateProjection(column: Column): boolean {
+  if (column.type !== "expr") {
+    return false;
+  }
+
+  return isAggregateExpression(column.expr);
+}
+
+function isAggregateExpression(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (value as { type?: unknown }).type === "aggr_func"
+  );
 }
 
 function getLimitValues(limit: Limit | null | undefined): readonly number[] {

@@ -9,6 +9,8 @@ import {
 } from "@clusterdata/shared";
 import { type JsonSchema, type ToolRegistry } from "@clusterdata/tool-system";
 
+const MAX_EMPTY_RESPONSE_RETRIES = 1;
+
 export const DevelopmentPrioritySchema = z.enum([
   "monorepo",
   "agent-core",
@@ -266,7 +268,14 @@ export class AgentExecutor {
     this.config = options.config;
     this.instructions =
       options.instructions ??
-      "You are ClusterDataAgent. Use available tools when they help answer data and safety questions accurately. Be concise and explicit.";
+      [
+        "You are ClusterDataAgent, a bilingual Chinese/English data analysis assistant.",
+        "For database, table, metric, count, list, aggregation, chart, access, or safety questions, use the available tools instead of guessing.",
+        "For Chinese business terms, map common words to likely metadata search terms before querying tools, for example 订单/order/orders, 客户/customer/customers, 事件/event/events.",
+        "When the user asks how many records/多少记录/多少条/count, first find the relevant table with search-metadata when the table is not explicit, then execute a safe read-only count query with query-sql when available.",
+        "Keep SQL read-only, bounded, and metadata-aware. Answer in the same language as the user unless they ask otherwise.",
+        "Be concise and explicit, and include the table or SQL result basis for data answers."
+      ].join(" ");
     this.logger = options.logger ?? createLogger("agent-core");
     this.transport =
       options.transport ??
@@ -357,6 +366,7 @@ export class AgentExecutor {
     );
     const toolCalls: AgentToolCallRecord[] = [];
     let totalToolCalls = 0;
+    let emptyResponseRetries = 0;
     let latestResponse: OpenAIResponse | undefined;
 
     this.logger.info("agent turn started", {
@@ -399,18 +409,48 @@ export class AgentExecutor {
       latestResponse = latestStreamResponse;
 
       if (!latestResponse) {
-        throw new AppError(
-          "OpenAI stream completed without a response payload",
-          "OPENAI_STREAM_MISSING_RESPONSE",
-          502
-        );
+        if (streamedOutputText.length > 0) {
+          latestResponse = buildSyntheticTextResponse(streamedOutputText);
+        } else {
+          throw new AppError(
+            "OpenAI stream completed without a response payload",
+            "OPENAI_STREAM_MISSING_RESPONSE",
+            502
+          );
+        }
       }
 
       const functionCalls = latestResponse.output.filter(isFunctionCallItem);
 
       if (functionCalls.length === 0) {
-        const outputText =
-          streamedOutputText.length > 0 ? streamedOutputText : extractOutputText(latestResponse);
+        let outputText = streamedOutputText;
+
+        if (outputText.length === 0) {
+          const extractedOutputText = tryExtractOutputText(latestResponse);
+
+          if (!extractedOutputText) {
+            if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
+              emptyResponseRetries += 1;
+              this.logger.warn("agent empty response retrying", {
+                sessionId: request.sessionId,
+                model,
+                responseId: latestResponse.id,
+                outputItemCount: latestResponse.output.length,
+                retry: emptyResponseRetries
+              });
+              continue;
+            }
+
+            throw new AppError("Model returned an empty response", "EMPTY_MODEL_RESPONSE", 502, {
+              sessionId: request.sessionId,
+              model,
+              responseId: latestResponse.id,
+              outputItemCount: latestResponse.output.length
+            });
+          }
+
+          outputText = extractedOutputText;
+        }
 
         this.sessionStore.append(request.sessionId, [
           {
@@ -452,6 +492,8 @@ export class AgentExecutor {
 
         return result;
       }
+
+      emptyResponseRetries = 0;
 
       for (const functionCall of functionCalls) {
         totalToolCalls += 1;
@@ -966,7 +1008,7 @@ function buildToolDefinitions(toolRegistry: ToolRegistry): readonly OpenAIFuncti
   }));
 }
 
-function extractOutputText(response: OpenAIResponse): string {
+function tryExtractOutputText(response: OpenAIResponse): string | undefined {
   if (typeof response.output_text === "string" && response.output_text.trim().length > 0) {
     return response.output_text;
   }
@@ -976,15 +1018,21 @@ function extractOutputText(response: OpenAIResponse): string {
       (item): item is Extract<OpenAIOutputItem, { type: "message" }> => item.type === "message"
     )
     .flatMap((item) => item.content)
-    .map((content) => content.text ?? "")
+    .map((content) => extractMessageContentText(content))
     .join("")
     .trim();
 
-  if (text.length === 0) {
-    throw new AppError("Model returned an empty response", "EMPTY_MODEL_RESPONSE", 502);
+  return text.length > 0 ? text : undefined;
+}
+
+function extractMessageContentText(content: { readonly type: string; readonly text?: string }): string {
+  if (typeof content.text === "string") {
+    return content.text;
   }
 
-  return text;
+  const refusal = (content as { readonly refusal?: string }).refusal;
+
+  return typeof refusal === "string" ? refusal : "";
 }
 
 function parseFunctionArguments(
@@ -1019,11 +1067,15 @@ function* buildFallbackResponseEvents(
   const functionCalls = response.output.filter(isFunctionCallItem);
 
   if (functionCalls.length === 0) {
-    for (const delta of chunkText(extractOutputText(response))) {
-      yield {
-        type: "response.output_text.delta",
-        delta
-      };
+    const outputText = tryExtractOutputText(response);
+
+    if (outputText) {
+      for (const delta of chunkText(outputText)) {
+        yield {
+          type: "response.output_text.delta",
+          delta
+        };
+      }
     }
   }
 
@@ -1081,6 +1133,20 @@ function extractCompletedStreamResponse(
   );
 }
 
+function buildSyntheticTextResponse(outputText: string): OpenAIResponse {
+  return {
+    id: `synthetic_stream_${Date.now()}`,
+    output_text: outputText,
+    output: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: outputText }]
+      }
+    ]
+  };
+}
+
 function isFailedOpenAIStreamEvent(
   event: OpenAIResponseStreamEvent
 ): event is OpenAIResponseFailedStreamEvent | OpenAIErrorStreamEvent {
@@ -1105,6 +1171,15 @@ function isRetryableOpenAIError(error: AppError): boolean {
 
 function normalizeAgentError(error: unknown): AppError {
   if (error instanceof AppError) {
+    if (isUnavailableModelChannelError(error.message, error.code)) {
+      return new AppError(
+        buildUnavailableModelChannelMessage(error.message),
+        "OPENAI_MODEL_CHANNEL_UNAVAILABLE",
+        error.statusCode,
+        error.details
+      );
+    }
+
     return error;
   }
 
@@ -1196,6 +1271,13 @@ function extractOpenAIErrorDetails(
         ? payload.code
         : "OPENAI_RESPONSE_ERROR");
 
+  if (isUnavailableModelChannelError(message, code)) {
+    return {
+      message: buildUnavailableModelChannelMessage(message),
+      code: "OPENAI_MODEL_CHANNEL_UNAVAILABLE"
+    };
+  }
+
   return {
     message,
     code
@@ -1228,14 +1310,41 @@ function extractOpenAIStreamErrorDetails(
       ? error.code
       : "OPENAI_STREAM_ERROR";
 
+  if (isUnavailableModelChannelError(message, code)) {
+    return {
+      message: buildUnavailableModelChannelMessage(message),
+      code: "OPENAI_MODEL_CHANNEL_UNAVAILABLE"
+    };
+  }
+
   return {
     message,
     code
   };
 }
 
+function isUnavailableModelChannelError(message: string, code: string): boolean {
+  return (
+    code === "model_not_found" &&
+    /no available channel for model/i.test(message)
+  );
+}
+
+function buildUnavailableModelChannelMessage(upstreamMessage: string): string {
+  return `The configured upstream model is not available in the current provider group. Update OPENAI_MODEL, OPENAI_ENDPOINT, or the API key/channel configuration. Upstream message: ${upstreamMessage}`;
+}
+
 function normalizeOpenAITransportError(error: unknown): AppError {
   if (error instanceof AppError) {
+    if (isUnavailableModelChannelError(error.message, error.code)) {
+      return new AppError(
+        buildUnavailableModelChannelMessage(error.message),
+        "OPENAI_MODEL_CHANNEL_UNAVAILABLE",
+        error.statusCode,
+        error.details
+      );
+    }
+
     return error;
   }
 
@@ -1313,6 +1422,10 @@ function parseOpenAIStreamChunk(chunk: string): OpenAIResponseStreamEvent | unde
     .map((line) => (line[5] === " " ? line.slice(6) : line.slice(5)));
 
   if (dataLines.length === 0) {
+    if (isIgnorableSseChunk(lines)) {
+      return undefined;
+    }
+
     throw new AppError("Malformed OpenAI SSE payload", "INVALID_OPENAI_STREAM_EVENT", 502, {
       chunk
     });
@@ -1349,6 +1462,20 @@ function parseOpenAIStreamChunk(chunk: string): OpenAIResponseStreamEvent | unde
   }
 
   return payload as OpenAIResponseStreamEvent;
+}
+
+function isIgnorableSseChunk(lines: readonly string[]): boolean {
+  return lines.every((line) => {
+    const trimmed = line.trim();
+
+    return (
+      trimmed.length === 0 ||
+      trimmed.startsWith(":") ||
+      trimmed.startsWith("event:") ||
+      trimmed.startsWith("id:") ||
+      trimmed.startsWith("retry:")
+    );
+  });
 }
 
 export function resolveResponsesApiEndpoint(endpoint: string): string {

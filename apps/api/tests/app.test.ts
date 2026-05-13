@@ -15,7 +15,7 @@ import {
   type ResponsesTransport
 } from "@clusterdata/agent-core";
 import { profileDataset } from "@clusterdata/analysis-service";
-import { buildApi } from "../src/app.js";
+import { buildApi, buildToolRegistry } from "../src/app.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -473,6 +473,51 @@ describe("api", () => {
     );
 
     await app.close();
+  });
+
+  it("exposes metadata search as an agent tool with Chinese business term expansion", async () => {
+    const catalog = createCatalogWithTables([
+      {
+        name: "cda_orders",
+        columns: [
+          { name: "id", dataType: "integer" },
+          { name: "customer_id", dataType: "integer" },
+          { name: "amount", dataType: "numeric" }
+        ]
+      }
+    ]);
+    const toolRegistry = buildToolRegistry(() => catalog);
+    const result = await toolRegistry.execute<{
+      query: string;
+      limit: number;
+    }, {
+      searchedQueries: readonly string[];
+      results: readonly { tableName: string }[];
+      tables: readonly { name: string; columns: readonly { name: string }[] }[];
+    }>("search-metadata", {
+      query: "订单",
+      limit: 5
+    });
+
+    expect(toolRegistry.list().map((tool) => tool.name)).toContain("search-metadata");
+    expect(result.searchedQueries).toContain("orders");
+    expect(result.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tableName: "cda_orders"
+        })
+      ])
+    );
+    expect(result.tables).toEqual([
+      {
+        name: "cda_orders",
+        columns: [
+          { name: "id", dataType: "integer" },
+          { name: "customer_id", dataType: "integer" },
+          { name: "amount", dataType: "numeric" }
+        ]
+      }
+    ]);
   });
 
   it("refreshes metadata and keeps sql tools bound to the latest catalog", async () => {

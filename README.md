@@ -5,7 +5,9 @@ Monorepo status:
 - API, web app, and core domain packages are in place
 - agent-core chat, native upstream SSE streaming, and session memory are in place
 - web app now uses the chat streaming endpoint as an interactive ChatBI workbench with markdown chat rendering, SQL validation, query history/CSV export, dataset profiling, and chart recommendation panels with visual previews
+- web app now supports English/Chinese interface switching and includes an in-app documentation page with usage tutorials, API calling examples, and workflow diagrams
 - web workbench now includes an Access Check panel for tenant and role authorization decisions
+- agent tools now include metadata search with Chinese/English business term expansion so natural-language questions like `订单中有多少记录` can discover `cda_orders` before running read-only SQL
 - metadata-engine now loads the Prisma schema catalog from `packages/database/prisma/schema.prisma`
 - sql-agent now validates and generates SELECT SQL against the loaded schema catalog
 - analysis-service now profiles JSON datasets with field statistics, data quality warnings, and time series trend/anomaly analysis
@@ -87,7 +89,8 @@ Metadata and SQL:
 - `POST /api/analysis/profile` profiles JSON rows, infers field kinds, computes numeric/category/date statistics, and reports missing, mixed, empty, and duplicate quality warnings.
 - `POST /api/charts/suggest` accepts either legacy labels/values input or a dataset profile and returns chart recommendations.
 - Large legacy chart payloads are automatically sampled for rendering, add zoom controls, and mark progressive rendering hints in the returned chart option metadata.
-- The registered agent tools include `validate-sql`, `generate-sql`, `query-sql`, `summarize-series`, `analyze-time-series`, `profile-dataset`, `suggest-chart`, and `recommend-charts`.
+- The registered agent tools include `search-metadata`, `validate-sql`, `generate-sql`, `query-sql`, `summarize-series`, `analyze-time-series`, `profile-dataset`, `suggest-chart`, and `recommend-charts`.
+- The agent prompt is bilingual and instructs Chinese/English data questions to use metadata and SQL tools for factual answers instead of guessing; common terms such as `订单`, `客户`, and `事件` are expanded to likely schema terms.
 - Current catalog inference is in-process; use `POST /api/metadata/refresh` after changing the Prisma schema or live PostgreSQL schema.
 
 Security guardrails:
@@ -131,6 +134,8 @@ Chart examples:
 
 Web workbench:
 - Open `http://127.0.0.1:3000`.
+- Use the language selector in the header to switch between English and Chinese.
+- Use the Workbench and Docs tabs to switch between the interactive ChatBI workspace and the in-app usage documentation.
 - Use the Conversation panel for streaming agent chat.
 - Assistant messages render markdown for headings, lists, code blocks, and links.
 - Use SQL Guardrail to validate metadata-aware SQL directly.
@@ -140,6 +145,11 @@ Web workbench:
 - Use Dataset Profile with JSON rows, then Chart Recommendations to get profile-aware chart suggestions.
 - Chart recommendations render inline previews from the profiled dataset rows instead of showing recommendation text alone.
 - Inline previews also sample large row sets so the workbench stays responsive when chart inputs grow.
+
+Documentation page:
+- The Docs tab includes a usage tutorial for the workbench flow.
+- The API calling tutorial includes curl examples for health checks, SQL validation, dataset profiling, and streaming chat.
+- The workflow section shows the ChatBI request path and includes Mermaid flowchart source for architecture documentation.
 
 PostgreSQL test schema:
 - The development scanner was verified against `127.0.0.1:5433/clusterdata` using test tables `cda_customers`, `cda_orders`, and `cda_order_events`.

@@ -695,7 +695,7 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
   return app;
 }
 
-function buildToolRegistry(
+export function buildToolRegistry(
   getMetadataCatalog: () => PrismaSchemaCatalog,
   queryExecutor?: ReadOnlyQueryExecutor,
   options: ToolRegistryOptions = {}
@@ -703,8 +703,89 @@ function buildToolRegistry(
   const toolRegistry = new ToolRegistry(options);
 
   toolRegistry.register({
+    name: "search-metadata",
+    description:
+      "Search the active schema catalog for tables, columns, and relations. Use this before SQL generation when a user asks a natural-language data question, including Chinese business terms such as 订单/order, 客户/customer, or 事件/event.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Business term, table name, or column name to search for"
+        },
+        limit: {
+          type: "integer",
+          description: "Maximum metadata matches to return"
+        }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    execution: {
+      timeoutMs: 2_000,
+      retries: 0
+    },
+    execute: (input: { query: string; limit?: number }, context) => {
+      const catalog = getMetadataCatalog();
+      const limit = input.limit ?? 10;
+      const searchedQueries = expandMetadataSearchQueries(input.query);
+      const rankedResults = new Map<
+        string,
+        ReturnType<typeof searchMetadataCatalog>[number]
+      >();
+
+      for (const query of searchedQueries) {
+        const queryResults = searchMetadataCatalog(catalog, query, limit);
+
+        for (const result of queryResults) {
+          const key = [
+            result.type,
+            result.tableName,
+            result.columnName ?? "",
+            result.relation
+              ? `${result.relation.fromTable}.${result.relation.fromColumn}.${result.relation.toTable}.${result.relation.toColumn}`
+              : ""
+          ].join(":");
+          const previous = rankedResults.get(key);
+
+          if (!previous || previous.score < result.score) {
+            rankedResults.set(key, result);
+          }
+        }
+      }
+
+      const results = [...rankedResults.values()]
+        .sort((left, right) => right.score - left.score)
+        .slice(0, limit);
+      const matchedTableNames = new Set(results.map((result) => result.tableName));
+      const tables = catalog.tables
+        .filter((table) => matchedTableNames.has(table.name))
+        .map((table) => ({
+          name: table.name,
+          columns: table.columns
+        }));
+
+      context?.logger?.info("metadata search tool completed", {
+        query: input.query,
+        searchedQueries,
+        limit,
+        resultCount: results.length,
+        tableCount: tables.length
+      });
+
+      return {
+        query: input.query,
+        searchedQueries,
+        results,
+        tables
+      };
+    }
+  });
+
+  toolRegistry.register({
     name: "validate-sql",
-    description: "Validate a SQL statement for safe execution",
+    description:
+      "Validate a SQL statement for safe execution against the active metadata catalog",
     inputSchema: {
       type: "object",
       properties: {
@@ -726,7 +807,8 @@ function buildToolRegistry(
 
   toolRegistry.register({
     name: "generate-sql",
-    description: "Generate a metadata-aware safe select statement",
+    description:
+      "Generate a metadata-aware safe SELECT statement for an explicit table and optional columns. Use search-metadata first when the table name is uncertain.",
     inputSchema: {
       type: "object",
       properties: {
@@ -765,7 +847,8 @@ function buildToolRegistry(
   if (queryExecutor) {
     toolRegistry.register({
       name: "query-sql",
-      description: "Execute a validated read-only SQL statement and return rows",
+      description:
+        "Execute a validated read-only SQL statement and return rows. Use this for factual database answers, including record counts such as select count(*) as count from table limit 1.",
       inputSchema: {
         type: "object",
         properties: {
@@ -984,6 +1067,34 @@ function buildToolRegistry(
   });
 
   return toolRegistry;
+}
+
+function expandMetadataSearchQueries(query: string): readonly string[] {
+  const normalizedQuery = query.trim();
+
+  if (normalizedQuery.length === 0) {
+    return [normalizedQuery];
+  }
+
+  const expansions = new Set<string>([normalizedQuery]);
+  const lowerQuery = normalizedQuery.toLowerCase();
+  const termExpansions: readonly [RegExp, readonly string[]][] = [
+    [/订单|order|orders/i, ["order", "orders", "cda_orders"]],
+    [/客户|customer|customers/i, ["customer", "customers", "cda_customers"]],
+    [/事件|event|events/i, ["event", "events", "cda_order_events"]]
+  ];
+
+  for (const [pattern, terms] of termExpansions) {
+    if (!pattern.test(lowerQuery)) {
+      continue;
+    }
+
+    for (const term of terms) {
+      expansions.add(term);
+    }
+  }
+
+  return [...expansions];
 }
 
 function createQueryExecutor(

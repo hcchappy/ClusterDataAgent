@@ -74,6 +74,73 @@ describe("agent-core", () => {
     ]);
   });
 
+  it("sends bilingual data-tool instructions to the model", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "search-metadata",
+      description: "Search metadata",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" }
+        },
+        required: ["query"],
+        additionalProperties: false
+      },
+      execute: () => ({ results: [] })
+    });
+    const sessionStore = new InMemorySessionStore(4);
+    let capturedRequest: unknown;
+    const transport: ResponsesTransport = {
+      createResponse: vi.fn(async (request) => {
+        capturedRequest = request;
+
+        return {
+          id: "resp_instructions",
+          output_text: "ok",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "ok" }]
+            }
+          ]
+        } as never;
+      })
+    };
+    const executor = new AgentExecutor({
+      toolRegistry: registry,
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport
+    });
+
+    await executor.executeTurn({
+      sessionId: "instructions",
+      message: "\u8ba2\u5355\u4e2d\u6709\u591a\u5c11\u8bb0\u5f55"
+    });
+
+    const request = capturedRequest as {
+      input: readonly {
+        role?: string;
+        content?: readonly { text: string }[];
+      }[];
+    };
+    const developerText = request.input[0]?.content?.[0]?.text ?? "";
+
+    expect(developerText).toContain("bilingual Chinese/English");
+    expect(developerText).toContain("\u591a\u5c11\u8bb0\u5f55");
+    expect(developerText).toContain("search-metadata");
+    expect(developerText).toContain("query-sql");
+  });
+
   it("handles tool calls and feeds outputs back to the model", async () => {
     const registry = new ToolRegistry();
     registry.register({
@@ -436,6 +503,55 @@ describe("agent-core", () => {
     expect(deltas.join("")).toBe("This is a streamed answer.");
   });
 
+  it("retries empty non-stream responses and succeeds on the next attempt", async () => {
+    const sessionStore = new InMemorySessionStore();
+    const transport = createTransport([
+      {
+        id: "resp_empty",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: []
+          }
+        ]
+      },
+      {
+        id: "resp_recovered",
+        output_text: "Recovered after retry",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Recovered after retry" }]
+          }
+        ]
+      }
+    ]);
+    const executor = new AgentExecutor({
+      toolRegistry: new ToolRegistry(),
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport
+    });
+
+    await expect(
+      executor.executeTurn({
+        sessionId: "retry-empty-response",
+        message: "Hi"
+      })
+    ).resolves.toMatchObject({
+      outputText: "Recovered after retry"
+    });
+  });
+
   it("forwards real upstream stream deltas when the transport supports streaming", async () => {
     const registry = new ToolRegistry();
     const sessionStore = new InMemorySessionStore();
@@ -502,6 +618,77 @@ describe("agent-core", () => {
     expect(streamResponse).toHaveBeenCalledTimes(1);
   });
 
+  it("retries empty stream completion payloads and succeeds", async () => {
+    let attempt = 0;
+    const streamResponse = vi.fn(async function* () {
+      attempt += 1;
+
+      if (attempt === 1) {
+        yield {
+          type: "response.completed",
+          response: {
+            id: "resp_stream_empty",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: []
+              }
+            ]
+          } as never
+        };
+        return;
+      }
+
+      yield {
+        type: "response.output_text.delta",
+        delta: "Recovered stream"
+      };
+      yield {
+        type: "response.completed",
+        response: {
+          id: "resp_stream_recovered",
+          output_text: "Recovered stream",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Recovered stream" }]
+            }
+          ]
+        }
+      };
+    });
+    const executor = new AgentExecutor({
+      toolRegistry: new ToolRegistry(),
+      sessionStore: new InMemorySessionStore(),
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: {
+        createResponse: vi.fn(async () => {
+          throw new Error("createResponse should not be used when streamResponse is available");
+        }),
+        streamResponse
+      }
+    });
+
+    await expect(
+      executor.executeTurn({
+        sessionId: "retry-empty-stream",
+        message: "Hi"
+      })
+    ).resolves.toMatchObject({
+      outputText: "Recovered stream"
+    });
+    expect(streamResponse).toHaveBeenCalledTimes(2);
+  });
+
   it("does not retry a failed stream after partial text has already been emitted", async () => {
     const registry = new ToolRegistry();
     const sessionStore = new InMemorySessionStore();
@@ -552,6 +739,142 @@ describe("agent-core", () => {
       "response.failed"
     ]);
     expect(streamResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes streams from text deltas when no final response payload is sent", async () => {
+    const sessionStore = new InMemorySessionStore();
+    const streamResponse = vi.fn(async function* () {
+      yield {
+        type: "response.output_text.delta",
+        delta: "There are "
+      };
+      yield {
+        type: "response.output_text.delta",
+        delta: "42 orders."
+      };
+    });
+    const executor = new AgentExecutor({
+      toolRegistry: new ToolRegistry(),
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: {
+        createResponse: vi.fn(async () => {
+          throw new Error("createResponse should not be used when streamResponse is available");
+        }),
+        streamResponse
+      }
+    });
+    let completedText = "";
+
+    for await (const event of executor.streamTurn({
+      sessionId: "stream-delta-only",
+      message: "How many orders?"
+    })) {
+      if (event.type === "response.completed") {
+        completedText = event.outputText;
+      }
+    }
+
+    expect(completedText).toBe("There are 42 orders.");
+    expect(sessionStore.get("stream-delta-only")).toEqual([
+      { role: "user", content: "How many orders?" },
+      { role: "assistant", content: "There are 42 orders." }
+    ]);
+  });
+
+  it("normalizes unavailable upstream model channel errors", async () => {
+    const executor = new AgentExecutor({
+      toolRegistry: new ToolRegistry(),
+      sessionStore: new InMemorySessionStore(),
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-unavailable",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: {
+        createResponse: vi.fn(async () => {
+          throw new AppError(
+            "No available channel for model gpt-unavailable under group default (distributor)",
+            "model_not_found",
+            404
+          );
+        })
+      }
+    });
+
+    await expect(
+      executor.executeTurn({
+        sessionId: "unavailable-model",
+        message: "Hi"
+      })
+    ).rejects.toMatchObject({
+      code: "OPENAI_MODEL_CHANNEL_UNAVAILABLE"
+    });
+  });
+
+  it("ignores upstream SSE heartbeat chunks without data lines", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(": keep-alive\n\n"));
+            controller.enqueue(encoder.encode("event: ping\n\n"));
+            controller.enqueue(
+              encoder.encode(
+                'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
+              )
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_heartbeat","output_text":"Hello","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}]}}\n\n'
+              )
+            );
+            controller.close();
+          }
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "text/event-stream" }
+        }
+      )
+    );
+    const executor = new AgentExecutor({
+      toolRegistry: new ToolRegistry(),
+      sessionStore: new InMemorySessionStore(),
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      }
+    });
+    const deltas: string[] = [];
+
+    for await (const event of executor.streamTurn({
+      sessionId: "stream-heartbeat",
+      message: "Hi"
+    })) {
+      if (event.type === "response.output_text.delta") {
+        deltas.push(event.delta);
+      }
+    }
+
+    expect(deltas).toEqual(["Hello"]);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    fetchMock.mockRestore();
   });
 
   it("normalizes base and full response endpoints", () => {

@@ -103,11 +103,6 @@ interface ToolActivity {
 }
 
 const logger = createLogger("web");
-const SUGGESTED_PROMPTS = [
-  "Summarize the sales trend for the last 7 days.",
-  "Validate this query: select * from orders limit 20",
-  "Suggest a chart for monthly revenue by region."
-];
 const DEFAULT_SQL = "select o.id, c.name from cda_orders o join cda_customers c on o.customer_id = c.id limit 20";
 const DEFAULT_SECURITY_CHECK: SecurityCheckRequest = {
   role: "analyst",
@@ -124,6 +119,431 @@ const DEFAULT_DATASET = JSON.stringify(
   null,
   2
 );
+
+type Language = "en" | "zh";
+type ViewMode = "workbench" | "docs";
+
+interface UiCopy {
+  readonly navWorkbench: string;
+  readonly navDocs: string;
+  readonly languageLabel: string;
+  readonly languageEnglish: string;
+  readonly languageChinese: string;
+  readonly title: string;
+  readonly subtitle: string;
+  readonly agentReady: string;
+  readonly agentOffline: string;
+  readonly conversation: string;
+  readonly tokens: string;
+  readonly agent: string;
+  readonly you: string;
+  readonly streaming: string;
+  readonly done: string;
+  readonly askAgent: string;
+  readonly composerPlaceholder: string;
+  readonly streamingHelp: string;
+  readonly working: string;
+  readonly send: string;
+  readonly sqlGuardrail: string;
+  readonly allowed: string;
+  readonly blocked: string;
+  readonly denied: string;
+  readonly sqlHelp: string;
+  readonly checking: string;
+  readonly validateSql: string;
+  readonly running: string;
+  readonly runQuery: string;
+  readonly tables: string;
+  readonly columns: string;
+  readonly limit: string;
+  readonly none: string;
+  readonly notSet: string;
+  readonly accessCheck: string;
+  readonly role: string;
+  readonly action: string;
+  readonly tenant: string;
+  readonly resourceTenant: string;
+  readonly accessHelp: string;
+  readonly checkAccess: string;
+  readonly decision: string;
+  readonly reason: string;
+  readonly code: string;
+  readonly policyMatched: string;
+  readonly accessAllowedCode: string;
+  readonly datasetProfile: string;
+  readonly rowsFields: (rows: number, fields: number) => string;
+  readonly jsonRows: string;
+  readonly datasetHelp: string;
+  readonly profiling: string;
+  readonly runProfile: string;
+  readonly chartRecommendations: string;
+  readonly recommending: string;
+  readonly recommendCharts: string;
+  readonly chartEmpty: string;
+  readonly noDimensions: string;
+  readonly noMetrics: string;
+  readonly to: string;
+  readonly agentOverview: string;
+  readonly goal: string;
+  readonly model: string;
+  readonly endpoint: string;
+  readonly memory: string;
+  readonly messages: string;
+  readonly tools: string;
+  readonly loadingWorkspace: string;
+  readonly toolActivity: string;
+  readonly toolEmpty: string;
+  readonly workspaceSignals: string;
+  readonly nextPriority: string;
+  readonly relations: string;
+  readonly security: string;
+  readonly ready: string;
+  readonly inputLimit: string;
+  readonly rows: string;
+  readonly missing: string;
+  readonly distinct: string;
+  readonly average: string;
+  readonly top: string;
+  readonly exportCsv: string;
+  readonly queryEmpty: string;
+  readonly recentQueries: string;
+  readonly historyStores: (count: number) => string;
+  readonly historyEmpty: string;
+  readonly clearHistory: string;
+  readonly reuse: string;
+  readonly querySummary: (rows: number, columns: number, durationMs: number) => string;
+  readonly welcomeMessage: string;
+  readonly loadingOverview: string;
+  readonly connectedStatus: string;
+  readonly credentialsStatus: string;
+  readonly overviewFailedStatus: string;
+  readonly responseCompleteStatus: string;
+  readonly responseFailedStatus: string;
+  readonly requestFailedStatus: string;
+  readonly loadedHistoryStatus: string;
+  readonly queryExportedStatus: string;
+  readonly historyClearedStatus: string;
+  readonly datasetArrayError: string;
+  readonly streamWithModel: (model: string) => string;
+  readonly prompts: readonly string[];
+  readonly docsTitle: string;
+  readonly docsSubtitle: string;
+  readonly tutorialTitle: string;
+  readonly tutorialItems: readonly string[];
+  readonly apiTutorialTitle: string;
+  readonly apiIntro: string;
+  readonly apiSteps: readonly {
+    readonly title: string;
+    readonly description: string;
+    readonly command: string;
+  }[];
+  readonly flowTitle: string;
+  readonly flowIntro: string;
+  readonly flowSteps: readonly string[];
+  readonly mermaidTitle: string;
+}
+
+const UI_COPY: Record<Language, UiCopy> = {
+  en: {
+    navWorkbench: "Workbench",
+    navDocs: "Docs",
+    languageLabel: "Language",
+    languageEnglish: "English",
+    languageChinese: "中文",
+    title: "ChatBI Workbench",
+    subtitle: "Stream agent answers, inspect tool activity, and keep the schema context in sight.",
+    agentReady: "agent ready",
+    agentOffline: "agent offline",
+    conversation: "Conversation",
+    tokens: "tokens",
+    agent: "Agent",
+    you: "You",
+    streaming: "streaming",
+    done: "done",
+    askAgent: "Ask the agent",
+    composerPlaceholder: "Ask the agent to validate SQL, summarize a series, or suggest a chart.",
+    streamingHelp: "Streaming is powered by the `/api/chat/stream` endpoint.",
+    working: "Working...",
+    send: "Send",
+    sqlGuardrail: "SQL Guardrail",
+    allowed: "allowed",
+    blocked: "blocked",
+    denied: "denied",
+    sqlHelp: "Validates against metadata, aliases, columns, and limits.",
+    checking: "Checking...",
+    validateSql: "Validate SQL",
+    running: "Running...",
+    runQuery: "Run Query",
+    tables: "Tables",
+    columns: "Columns",
+    limit: "Limit",
+    none: "none",
+    notSet: "not set",
+    accessCheck: "Access Check",
+    role: "Role",
+    action: "Action",
+    tenant: "Tenant",
+    resourceTenant: "Resource Tenant",
+    accessHelp: "Checks tenant isolation and role permissions.",
+    checkAccess: "Check Access",
+    decision: "Decision",
+    reason: "Reason",
+    code: "Code",
+    policyMatched: "policy matched",
+    accessAllowedCode: "ACCESS_ALLOWED",
+    datasetProfile: "Dataset Profile",
+    rowsFields: (rows, fields) => `${rows} rows / ${fields} fields`,
+    jsonRows: "JSON rows",
+    datasetHelp: "Profiles field types, missing values, distributions, and quality.",
+    profiling: "Profiling...",
+    runProfile: "Run Profile",
+    chartRecommendations: "Chart Recommendations",
+    recommending: "Recommending...",
+    recommendCharts: "Recommend Charts",
+    chartEmpty: "Run a dataset profile, then request chart recommendations.",
+    noDimensions: "no dimensions",
+    noMetrics: "no metrics",
+    to: "to",
+    agentOverview: "Agent Overview",
+    goal: "Goal",
+    model: "Model",
+    endpoint: "Endpoint",
+    memory: "Memory",
+    messages: "messages",
+    tools: "Tools",
+    loadingWorkspace: "Loading workspace summary...",
+    toolActivity: "Tool Activity",
+    toolEmpty: "Tool calls will appear here as the agent works.",
+    workspaceSignals: "Workspace Signals",
+    nextPriority: "Next Priority",
+    relations: "Relations",
+    security: "Security",
+    ready: "ready",
+    inputLimit: "Input Limit",
+    rows: "rows",
+    missing: "Missing",
+    distinct: "Distinct",
+    average: "Average",
+    top: "Top",
+    exportCsv: "Export CSV",
+    queryEmpty: "Query completed without returning rows.",
+    recentQueries: "Recent Queries",
+    historyStores: (count) => `Stores the last ${count} successful runs in this browser.`,
+    historyEmpty: "Run a query to create a reusable history entry.",
+    clearHistory: "Clear History",
+    reuse: "Reuse",
+    querySummary: (rows, columns, durationMs) => `${rows} rows, ${columns} columns, ${durationMs} ms`,
+    welcomeMessage:
+      "Agent core is online. Ask me to validate SQL, summarize a numeric series, or suggest a chart.",
+    loadingOverview: "loading overview",
+    connectedStatus: "connected to agent api",
+    credentialsStatus: "agent requires credentials",
+    overviewFailedStatus: "overview failed",
+    responseCompleteStatus: "response complete",
+    responseFailedStatus: "response failed",
+    requestFailedStatus: "request failed",
+    loadedHistoryStatus: "loaded query from history",
+    queryExportedStatus: "query exported",
+    historyClearedStatus: "query history cleared",
+    datasetArrayError: "Dataset input must be a JSON array",
+    streamWithModel: (model) => `streaming with ${model}`,
+    prompts: [
+      "Summarize the sales trend for the last 7 days.",
+      "Validate this query: select * from orders limit 20",
+      "Suggest a chart for monthly revenue by region."
+    ],
+    docsTitle: "Usage Documentation",
+    docsSubtitle: "A practical guide for operating the ChatBI workbench and calling the API directly.",
+    tutorialTitle: "Usage Tutorial",
+    tutorialItems: [
+      "Open the Workbench tab and confirm the agent status is ready or review the credentials message.",
+      "Use Conversation for natural-language analysis, SQL checks, dataset summaries, and chart requests.",
+      "Use SQL Guardrail to validate bounded SELECT statements before running read-only queries.",
+      "Paste JSON rows into Dataset Profile, run the profile, then generate chart recommendations.",
+      "Use Access Check to verify tenant isolation and role/action decisions before exposing data."
+    ],
+    apiTutorialTitle: "API Calling Tutorial",
+    apiIntro: "The examples assume the API is running at http://127.0.0.1:3001.",
+    apiSteps: [
+      {
+        title: "Health check",
+        description: "Confirm the API process and database configuration summary are reachable.",
+        command: "curl http://127.0.0.1:3001/health"
+      },
+      {
+        title: "Validate SQL",
+        description: "Check that a read-only query is bounded and matches the metadata catalog.",
+        command:
+          'curl -X POST http://127.0.0.1:3001/api/sql/validate -H "content-type: application/json" -d "{\\"sql\\":\\"select id, name from Tenant limit 20\\"}"'
+      },
+      {
+        title: "Profile dataset",
+        description: "Infer field kinds, distributions, missing values, and quality warnings from JSON rows.",
+        command:
+          'curl -X POST http://127.0.0.1:3001/api/analysis/profile -H "content-type: application/json" -d "{\\"rows\\":[{\\"region\\":\\"north\\",\\"amount\\":10},{\\"region\\":\\"south\\",\\"amount\\":20}]}"'
+      },
+      {
+        title: "Stream chat",
+        description: "Ask the agent to call tools and stream answer deltas back to the browser or terminal.",
+        command:
+          'curl -N -X POST http://127.0.0.1:3001/api/chat/stream -H "content-type: application/json" -d "{\\"sessionId\\":\\"demo\\",\\"message\\":\\"Validate select id from Tenant limit 20\\"}"'
+      }
+    ],
+    flowTitle: "Workflow",
+    flowIntro: "The workbench keeps the agent, metadata, guardrails, analysis, charting, and security checks in one loop.",
+    flowSteps: ["User", "Workbench", "API", "Agent Tools", "Metadata and SQL", "Analysis and Charts", "Decision"],
+    mermaidTitle: "Mermaid Flow Source"
+  },
+  zh: {
+    navWorkbench: "工作台",
+    navDocs: "文档",
+    languageLabel: "语言",
+    languageEnglish: "English",
+    languageChinese: "中文",
+    title: "ChatBI 工作台",
+    subtitle: "流式获取 Agent 回答，查看工具活动，并保持数据模型上下文可见。",
+    agentReady: "Agent 就绪",
+    agentOffline: "Agent 离线",
+    conversation: "对话",
+    tokens: "tokens",
+    agent: "Agent",
+    you: "你",
+    streaming: "流式输出",
+    done: "完成",
+    askAgent: "询问 Agent",
+    composerPlaceholder: "让 Agent 校验 SQL、总结序列，或推荐图表。",
+    streamingHelp: "流式输出由 `/api/chat/stream` 接口提供。",
+    working: "处理中...",
+    send: "发送",
+    sqlGuardrail: "SQL 护栏",
+    allowed: "允许",
+    blocked: "拦截",
+    denied: "拒绝",
+    sqlHelp: "根据元数据、别名、字段和 LIMIT 校验 SQL。",
+    checking: "校验中...",
+    validateSql: "校验 SQL",
+    running: "运行中...",
+    runQuery: "运行查询",
+    tables: "表",
+    columns: "字段",
+    limit: "限制",
+    none: "无",
+    notSet: "未设置",
+    accessCheck: "访问检查",
+    role: "角色",
+    action: "操作",
+    tenant: "租户",
+    resourceTenant: "资源租户",
+    accessHelp: "检查租户隔离和角色权限。",
+    checkAccess: "检查权限",
+    decision: "决策",
+    reason: "原因",
+    code: "代码",
+    policyMatched: "策略通过",
+    accessAllowedCode: "ACCESS_ALLOWED",
+    datasetProfile: "数据集画像",
+    rowsFields: (rows, fields) => `${rows} 行 / ${fields} 个字段`,
+    jsonRows: "JSON 行数据",
+    datasetHelp: "分析字段类型、缺失值、分布和质量。",
+    profiling: "画像生成中...",
+    runProfile: "生成画像",
+    chartRecommendations: "图表推荐",
+    recommending: "推荐中...",
+    recommendCharts: "推荐图表",
+    chartEmpty: "先生成数据集画像，再请求图表推荐。",
+    noDimensions: "无维度",
+    noMetrics: "无指标",
+    to: "到",
+    agentOverview: "Agent 概览",
+    goal: "目标",
+    model: "模型",
+    endpoint: "接口地址",
+    memory: "记忆",
+    messages: "条消息",
+    tools: "工具",
+    loadingWorkspace: "正在加载工作区摘要...",
+    toolActivity: "工具活动",
+    toolEmpty: "Agent 工作时，工具调用会显示在这里。",
+    workspaceSignals: "工作区信号",
+    nextPriority: "下一优先级",
+    relations: "关系",
+    security: "安全",
+    ready: "就绪",
+    inputLimit: "输入限制",
+    rows: "行",
+    missing: "缺失",
+    distinct: "去重值",
+    average: "平均值",
+    top: "最高频",
+    exportCsv: "导出 CSV",
+    queryEmpty: "查询完成，但没有返回行。",
+    recentQueries: "最近查询",
+    historyStores: (count) => `在当前浏览器中保存最近 ${count} 次成功查询。`,
+    historyEmpty: "运行一次查询后会生成可复用历史记录。",
+    clearHistory: "清空历史",
+    reuse: "复用",
+    querySummary: (rows, columns, durationMs) => `${rows} 行，${columns} 列，${durationMs} ms`,
+    welcomeMessage: "Agent core 已上线。你可以让我校验 SQL、总结数值序列，或推荐图表。",
+    loadingOverview: "正在加载概览",
+    connectedStatus: "已连接 Agent API",
+    credentialsStatus: "Agent 需要凭据",
+    overviewFailedStatus: "概览加载失败",
+    responseCompleteStatus: "回答完成",
+    responseFailedStatus: "回答失败",
+    requestFailedStatus: "请求失败",
+    loadedHistoryStatus: "已从历史载入查询",
+    queryExportedStatus: "查询已导出",
+    historyClearedStatus: "查询历史已清空",
+    datasetArrayError: "数据集输入必须是 JSON 数组",
+    streamWithModel: (model) => `正在使用 ${model} 流式输出`,
+    prompts: ["总结最近 7 天的销售趋势。", "校验这个查询：select * from orders limit 20", "为按区域统计的月收入推荐图表。"],
+    docsTitle: "使用文档",
+    docsSubtitle: "面向 ChatBI 工作台操作和 API 直接调用的实用指南。",
+    tutorialTitle: "使用教程",
+    tutorialItems: [
+      "打开工作台标签，确认 Agent 状态为就绪，或查看凭据提示。",
+      "在对话区使用自然语言完成分析、SQL 检查、数据总结和图表请求。",
+      "在 SQL 护栏中先校验带 LIMIT 的 SELECT，再运行只读查询。",
+      "把 JSON 行数据粘贴到数据集画像，生成画像后再推荐图表。",
+      "使用访问检查，在暴露数据前验证租户隔离和角色/操作决策。"
+    ],
+    apiTutorialTitle: "接口调用教程",
+    apiIntro: "以下示例假设 API 运行在 http://127.0.0.1:3001。",
+    apiSteps: [
+      {
+        title: "健康检查",
+        description: "确认 API 进程和数据库配置摘要可访问。",
+        command: "curl http://127.0.0.1:3001/health"
+      },
+      {
+        title: "校验 SQL",
+        description: "检查只读查询是否带边界，并匹配元数据目录。",
+        command:
+          'curl -X POST http://127.0.0.1:3001/api/sql/validate -H "content-type: application/json" -d "{\\"sql\\":\\"select id, name from Tenant limit 20\\"}"'
+      },
+      {
+        title: "生成数据集画像",
+        description: "从 JSON 行数据中推断字段类型、分布、缺失值和质量告警。",
+        command:
+          'curl -X POST http://127.0.0.1:3001/api/analysis/profile -H "content-type: application/json" -d "{\\"rows\\":[{\\"region\\":\\"north\\",\\"amount\\":10},{\\"region\\":\\"south\\",\\"amount\\":20}]}"'
+      },
+      {
+        title: "流式对话",
+        description: "让 Agent 调用工具，并把回答增量流式返回浏览器或终端。",
+        command:
+          'curl -N -X POST http://127.0.0.1:3001/api/chat/stream -H "content-type: application/json" -d "{\\"sessionId\\":\\"demo\\",\\"message\\":\\"Validate select id from Tenant limit 20\\"}"'
+      }
+    ],
+    flowTitle: "流程图",
+    flowIntro: "工作台把 Agent、元数据、护栏、分析、图表和安全检查放在同一个闭环中。",
+    flowSteps: ["用户", "工作台", "API", "Agent 工具", "元数据与 SQL", "分析与图表", "决策"],
+    mermaidTitle: "Mermaid 流程源码"
+  }
+};
+
+function getCopy(language: Language): UiCopy {
+  return UI_COPY[language];
+}
 
 function Panel({
   title,
@@ -146,6 +566,8 @@ function Panel({
 }
 
 export function AppShell({
+  language,
+  activeView,
   overview,
   messages,
   toolActivity,
@@ -181,8 +603,12 @@ export function AppShell({
   onProfileDataset,
   onRecommendCharts,
   onSecurityCheckChange,
-  onCheckAccess
+  onCheckAccess,
+  onLanguageChange,
+  onViewChange
 }: {
+  readonly language: Language;
+  readonly activeView: ViewMode;
   readonly overview: OverviewResponse | null;
   readonly messages: readonly ChatMessage[];
   readonly toolActivity: readonly ToolActivity[];
@@ -219,43 +645,80 @@ export function AppShell({
   readonly onRecommendCharts: () => void;
   readonly onSecurityCheckChange: (request: SecurityCheckRequest) => void;
   readonly onCheckAccess: () => void;
+  readonly onLanguageChange: (language: Language) => void;
+  readonly onViewChange: (view: ViewMode) => void;
 }): ReactElement {
   const latestUsage = getLatestUsage(messages);
+  const copy = getCopy(language);
 
   return (
     <main className="workspace-shell">
       <header className="workspace-header">
-        <div>
-          <p className="eyebrow">ClusterDataAgent</p>
-          <h1>ChatBI Workbench</h1>
-          <p className="subtle">
-            Stream agent answers, inspect tool activity, and keep the schema context in
-            sight.
-          </p>
-        </div>
-        <div className="workspace-status">
-          <span className={`status-dot ${overview?.agent.configured ? "is-ready" : "is-off"}`} />
+        <div className="workspace-primary">
+          <div className="view-tabs" aria-label="Primary view">
+            <button
+              type="button"
+              className={activeView === "workbench" ? "is-active" : ""}
+              onClick={() => onViewChange("workbench")}
+            >
+              {copy.navWorkbench}
+            </button>
+            <button
+              type="button"
+              className={activeView === "docs" ? "is-active" : ""}
+              onClick={() => onViewChange("docs")}
+            >
+              {copy.navDocs}
+            </button>
+          </div>
           <div>
-            <p className="status-label">{overview?.agent.configured ? "agent ready" : "agent offline"}</p>
-            <p className="status-meta">{statusText}</p>
+            <p className="eyebrow">ClusterDataAgent</p>
+            <h1>{activeView === "docs" ? copy.docsTitle : copy.title}</h1>
+            <p className="subtle">{activeView === "docs" ? copy.docsSubtitle : copy.subtitle}</p>
+          </div>
+        </div>
+        <div className="workspace-controls">
+          <label className="language-select">
+            <span>{copy.languageLabel}</span>
+            <select
+              value={language}
+              onChange={(event) => onLanguageChange(event.target.value as Language)}
+            >
+              <option value="en">{copy.languageEnglish}</option>
+              <option value="zh">{copy.languageChinese}</option>
+            </select>
+          </label>
+          <div className="workspace-status">
+            <span className={`status-dot ${overview?.agent.configured ? "is-ready" : "is-off"}`} />
+            <div>
+              <p className="status-label">
+                {overview?.agent.configured ? copy.agentReady : copy.agentOffline}
+              </p>
+              <p className="status-meta">{statusText}</p>
+            </div>
           </div>
         </div>
       </header>
 
       {errorMessage ? <p className="error">{errorMessage}</p> : null}
 
+      {activeView === "docs" ? <DocsPage copy={copy} /> : null}
+
+      {activeView === "workbench" ? (
       <div className="workspace-grid">
         <section className="chat-column">
           <Panel
-            title="Conversation"
+            title={copy.conversation}
             actions={
               latestUsage ? (
-                <span className="token-badge">{latestUsage.totalTokens} tokens</span>
+                <span className="token-badge">
+                  {latestUsage.totalTokens} {copy.tokens}
+                </span>
               ) : null
             }
           >
             <div className="prompt-row">
-              {SUGGESTED_PROMPTS.map((prompt) => (
+              {copy.prompts.map((prompt) => (
                 <button
                   key={prompt}
                   type="button"
@@ -274,8 +737,8 @@ export function AppShell({
                   className={`message-bubble ${message.role === "assistant" ? "is-assistant" : "is-user"}`}
                 >
                   <div className="message-meta">
-                    <span>{message.role === "assistant" ? "Agent" : "You"}</span>
-                    <span>{message.status === "streaming" ? "streaming" : "done"}</span>
+                    <span>{message.role === "assistant" ? copy.agent : copy.you}</span>
+                    <span>{message.status === "streaming" ? copy.streaming : copy.done}</span>
                   </div>
                   {message.content ? (
                     <MarkdownContent content={message.content} />
@@ -294,7 +757,7 @@ export function AppShell({
               }}
             >
               <label className="sr-only" htmlFor="chat-composer">
-                Ask the agent
+                {copy.askAgent}
               </label>
               <textarea
                 id="chat-composer"
@@ -302,26 +765,24 @@ export function AppShell({
                 onChange={(event) => onComposerChange(event.target.value)}
                 className="composer-input"
                 rows={4}
-                placeholder="Ask the agent to validate SQL, summarize a series, or suggest a chart."
+                placeholder={copy.composerPlaceholder}
                 disabled={isStreaming}
               />
               <div className="composer-footer">
-                <p className="subtle small">
-                  Streaming is powered by the new `/api/chat/stream` endpoint.
-                </p>
+                <p className="subtle small">{copy.streamingHelp}</p>
                 <button type="submit" className="primary-button" disabled={isStreaming}>
-                  {isStreaming ? "Working..." : "Send"}
+                  {isStreaming ? copy.working : copy.send}
                 </button>
               </div>
             </form>
           </Panel>
 
           <Panel
-            title="SQL Guardrail"
+            title={copy.sqlGuardrail}
             actions={
               sqlResult ? (
                 <span className={`result-pill ${getValidationBadgeState(sqlResult)}`}>
-                  {sqlResult.allowed ? "allowed" : "blocked"}
+                  {sqlResult.allowed ? copy.allowed : copy.blocked}
                 </span>
               ) : null
             }
@@ -336,7 +797,7 @@ export function AppShell({
                 rows={4}
               />
               <div className="tool-footer">
-                <p className="subtle small">Validates against metadata, aliases, columns, and limits.</p>
+                <p className="subtle small">{copy.sqlHelp}</p>
                 <div className="button-row">
                   <button
                     type="button"
@@ -344,7 +805,7 @@ export function AppShell({
                     disabled={isValidatingSql || isRunningSql}
                     onClick={onValidateSql}
                   >
-                    {isValidatingSql ? "Checking..." : "Validate SQL"}
+                    {isValidatingSql ? copy.checking : copy.validateSql}
                   </button>
                   <button
                     type="button"
@@ -352,7 +813,7 @@ export function AppShell({
                     disabled={isRunningSql}
                     onClick={onRunSql}
                   >
-                    {isRunningSql ? "Running..." : "Run Query"}
+                    {isRunningSql ? copy.running : copy.runQuery}
                   </button>
                 </div>
               </div>
@@ -362,16 +823,16 @@ export function AppShell({
                 {sqlResult.reason ? <p className="warning-text">{sqlResult.reason}</p> : null}
                 <dl className="compact-kv">
                   <div>
-                    <dt>Tables</dt>
-                    <dd>{sqlResult.referencedTables?.join(", ") || "none"}</dd>
+                    <dt>{copy.tables}</dt>
+                    <dd>{sqlResult.referencedTables?.join(", ") || copy.none}</dd>
                   </div>
                   <div>
-                    <dt>Columns</dt>
-                    <dd>{sqlResult.referencedColumns?.join(", ") || "none"}</dd>
+                    <dt>{copy.columns}</dt>
+                    <dd>{sqlResult.referencedColumns?.join(", ") || copy.none}</dd>
                   </div>
                   <div>
-                    <dt>Limit</dt>
-                    <dd>{sqlResult.limit ?? "not set"}</dd>
+                    <dt>{copy.limit}</dt>
+                    <dd>{sqlResult.limit ?? copy.notSet}</dd>
                   </div>
                 </dl>
               </div>
@@ -379,6 +840,7 @@ export function AppShell({
             {sqlQueryResult ? (
               <SqlQueryResultView
                 result={sqlQueryResult}
+                copy={copy}
                 onExport={() => {
                   onExportSqlResult();
                 }}
@@ -386,6 +848,7 @@ export function AppShell({
             ) : null}
             <SqlHistoryView
               history={sqlHistory}
+              copy={copy}
               onReuse={onReuseSqlHistory}
               onExport={onExportSqlResult}
               onClear={onClearSqlHistory}
@@ -393,18 +856,18 @@ export function AppShell({
           </Panel>
 
           <Panel
-            title="Access Check"
+            title={copy.accessCheck}
             actions={
               securityDecision ? (
                 <span className={`result-pill ${securityDecision.allowed ? "is-ok" : "is-bad"}`}>
-                  {securityDecision.allowed ? "allowed" : "denied"}
+                  {securityDecision.allowed ? copy.allowed : copy.denied}
                 </span>
               ) : null
             }
           >
             <div className="security-grid">
               <label>
-                <span>Role</span>
+                <span>{copy.role}</span>
                 <select
                   value={securityCheck.role}
                   onChange={(event) =>
@@ -420,7 +883,7 @@ export function AppShell({
                 </select>
               </label>
               <label>
-                <span>Action</span>
+                <span>{copy.action}</span>
                 <select
                   value={securityCheck.action}
                   onChange={(event) =>
@@ -436,7 +899,7 @@ export function AppShell({
                 </select>
               </label>
               <label>
-                <span>Tenant</span>
+                <span>{copy.tenant}</span>
                 <input
                   value={securityCheck.tenantId}
                   onChange={(event) =>
@@ -448,7 +911,7 @@ export function AppShell({
                 />
               </label>
               <label>
-                <span>Resource Tenant</span>
+                <span>{copy.resourceTenant}</span>
                 <input
                   value={securityCheck.resourceTenantId}
                   onChange={(event) =>
@@ -461,30 +924,30 @@ export function AppShell({
               </label>
             </div>
             <div className="tool-footer">
-              <p className="subtle small">Checks tenant isolation and role permissions.</p>
+              <p className="subtle small">{copy.accessHelp}</p>
               <button
                 type="button"
                 className="primary-button"
                 disabled={isCheckingAccess}
                 onClick={onCheckAccess}
               >
-                {isCheckingAccess ? "Checking..." : "Check Access"}
+                {isCheckingAccess ? copy.checking : copy.checkAccess}
               </button>
             </div>
             {securityDecision ? (
               <div className="result-box">
                 <dl className="compact-kv">
                   <div>
-                    <dt>Decision</dt>
-                    <dd>{securityDecision.allowed ? "allowed" : "denied"}</dd>
+                    <dt>{copy.decision}</dt>
+                    <dd>{securityDecision.allowed ? copy.allowed : copy.denied}</dd>
                   </div>
                   <div>
-                    <dt>Reason</dt>
-                    <dd>{securityDecision.reason ?? "policy matched"}</dd>
+                    <dt>{copy.reason}</dt>
+                    <dd>{securityDecision.reason ?? copy.policyMatched}</dd>
                   </div>
                   <div>
-                    <dt>Code</dt>
-                    <dd>{securityDecision.code ?? "ACCESS_ALLOWED"}</dd>
+                    <dt>{copy.code}</dt>
+                    <dd>{securityDecision.code ?? copy.accessAllowedCode}</dd>
                   </div>
                 </dl>
               </div>
@@ -492,17 +955,17 @@ export function AppShell({
           </Panel>
 
           <Panel
-            title="Dataset Profile"
+            title={copy.datasetProfile}
             actions={
               datasetProfile ? (
                 <span className="token-badge">
-                  {datasetProfile.rowCount} rows / {datasetProfile.fieldCount} fields
+                  {copy.rowsFields(datasetProfile.rowCount, datasetProfile.fieldCount)}
                 </span>
               ) : null
             }
           >
             <div className="tool-form">
-              <label htmlFor="dataset-input">JSON rows</label>
+              <label htmlFor="dataset-input">{copy.jsonRows}</label>
               <textarea
                 id="dataset-input"
                 value={datasetValue}
@@ -511,22 +974,22 @@ export function AppShell({
                 rows={8}
               />
               <div className="tool-footer">
-                <p className="subtle small">Profiles field types, missing values, distributions, and quality.</p>
+                <p className="subtle small">{copy.datasetHelp}</p>
                 <button
                   type="button"
                   className="primary-button"
                   disabled={isProfilingDataset}
                   onClick={onProfileDataset}
                 >
-                  {isProfilingDataset ? "Profiling..." : "Run Profile"}
+                  {isProfilingDataset ? copy.profiling : copy.runProfile}
                 </button>
               </div>
             </div>
-            {datasetProfile ? <DatasetProfileView profile={datasetProfile} /> : null}
+            {datasetProfile ? <DatasetProfileView profile={datasetProfile} copy={copy} /> : null}
           </Panel>
 
           <Panel
-            title="Chart Recommendations"
+            title={copy.chartRecommendations}
             actions={
               <button
                 type="button"
@@ -534,7 +997,7 @@ export function AppShell({
                 disabled={!datasetProfile || isRecommendingCharts}
                 onClick={onRecommendCharts}
               >
-                {isRecommendingCharts ? "Recommending..." : "Recommend Charts"}
+                {isRecommendingCharts ? copy.recommending : copy.recommendCharts}
               </button>
             }
           >
@@ -549,8 +1012,8 @@ export function AppShell({
                     </div>
                     <p className="subtle small">{recommendation.reason}</p>
                     <p className="subtle small">
-                      {recommendation.dimensions.join(", ") || "no dimensions"} to{" "}
-                      {recommendation.metrics.join(", ") || "no metrics"}
+                      {recommendation.dimensions.join(", ") || copy.noDimensions} {copy.to}{" "}
+                      {recommendation.metrics.join(", ") || copy.noMetrics}
                     </p>
                     <ChartRecommendationPreview
                       recommendation={recommendation}
@@ -561,42 +1024,44 @@ export function AppShell({
                 ))}
               </div>
             ) : (
-              <p className="subtle">Run a dataset profile, then request chart recommendations.</p>
+              <p className="subtle">{copy.chartEmpty}</p>
             )}
           </Panel>
         </section>
 
         <aside className="sidebar-column">
-          <Panel title="Agent Overview">
+          <Panel title={copy.agentOverview}>
             {overview ? (
               <dl className="kv">
                 <div>
-                  <dt>Goal</dt>
+                  <dt>{copy.goal}</dt>
                   <dd>{overview.manifest.currentGoal}</dd>
                 </div>
                 <div>
-                  <dt>Model</dt>
+                  <dt>{copy.model}</dt>
                   <dd>{overview.agent.defaultModel}</dd>
                 </div>
                 <div>
-                  <dt>Endpoint</dt>
+                  <dt>{copy.endpoint}</dt>
                   <dd className="mono">{overview.agent.endpoint}</dd>
                 </div>
                 <div>
-                  <dt>Memory</dt>
-                  <dd>{overview.agent.memoryLimit} messages</dd>
+                  <dt>{copy.memory}</dt>
+                  <dd>
+                    {overview.agent.memoryLimit} {copy.messages}
+                  </dd>
                 </div>
                 <div>
-                  <dt>Tools</dt>
+                  <dt>{copy.tools}</dt>
                   <dd>{overview.tools.length}</dd>
                 </div>
               </dl>
             ) : (
-              <p className="subtle">Loading workspace summary...</p>
+              <p className="subtle">{copy.loadingWorkspace}</p>
             )}
           </Panel>
 
-          <Panel title="Tool Activity">
+          <Panel title={copy.toolActivity}>
             {toolActivity.length > 0 ? (
               <div className="activity-list">
                 {toolActivity.map((activity) => (
@@ -613,33 +1078,35 @@ export function AppShell({
                 ))}
               </div>
             ) : (
-              <p className="subtle">Tool calls will appear here as the agent works.</p>
+              <p className="subtle">{copy.toolEmpty}</p>
             )}
           </Panel>
 
-          <Panel title="Workspace Signals">
+          <Panel title={copy.workspaceSignals}>
             {overview ? (
               <dl className="kv">
                 <div>
-                  <dt>Next Priority</dt>
+                  <dt>{copy.nextPriority}</dt>
                   <dd>{overview.manifest.nextPriority}</dd>
                 </div>
                 <div>
-                  <dt>Tables</dt>
+                  <dt>{copy.tables}</dt>
                   <dd>{overview.metadata.tableCount}</dd>
                 </div>
                 <div>
-                  <dt>Relations</dt>
+                  <dt>{copy.relations}</dt>
                   <dd>{overview.metadata.relationCount}</dd>
                 </div>
                 <div>
-                  <dt>Security</dt>
-                  <dd>{overview.security.allowed ? "ready" : overview.security.reason ?? "blocked"}</dd>
+                  <dt>{copy.security}</dt>
+                  <dd>{overview.security.allowed ? copy.ready : overview.security.reason ?? copy.blocked}</dd>
                 </div>
                 {overview.requestSecurity ? (
                   <div>
-                    <dt>Input Limit</dt>
-                    <dd>{overview.requestSecurity.maxDatasetRows} rows</dd>
+                    <dt>{copy.inputLimit}</dt>
+                    <dd>
+                      {overview.requestSecurity.maxDatasetRows} {copy.rows}
+                    </dd>
                   </div>
                 ) : null}
               </dl>
@@ -647,11 +1114,65 @@ export function AppShell({
           </Panel>
         </aside>
       </div>
+      ) : null}
     </main>
   );
 }
 
-function DatasetProfileView({ profile }: { readonly profile: DatasetProfile }): ReactElement {
+function DocsPage({ copy }: { readonly copy: UiCopy }): ReactElement {
+  const mermaidSource = buildWorkflowMermaid(copy.flowSteps);
+
+  return (
+    <div className="docs-layout">
+      <Panel title={copy.tutorialTitle}>
+        <ol className="docs-list">
+          {copy.tutorialItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ol>
+      </Panel>
+
+      <Panel title={copy.apiTutorialTitle}>
+        <p className="subtle docs-intro">{copy.apiIntro}</p>
+        <div className="api-guide-list">
+          {copy.apiSteps.map((step) => (
+            <article key={step.title} className="api-guide-item">
+              <div>
+                <strong>{step.title}</strong>
+                <p className="subtle small">{step.description}</p>
+              </div>
+              <pre className="docs-code">{step.command}</pre>
+            </article>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel title={copy.flowTitle}>
+        <p className="subtle docs-intro">{copy.flowIntro}</p>
+        <div className="flow-diagram" aria-label={copy.flowTitle}>
+          {copy.flowSteps.map((step, index) => (
+            <div key={step} className="flow-step">
+              <span>{index + 1}</span>
+              <strong>{step}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="result-box">
+          <strong>{copy.mermaidTitle}</strong>
+          <pre className="docs-code">{mermaidSource}</pre>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function DatasetProfileView({
+  profile,
+  copy
+}: {
+  readonly profile: DatasetProfile;
+  readonly copy: UiCopy;
+}): ReactElement {
   return (
     <div className="profile-summary">
       {profile.quality.warnings.length > 0 ? (
@@ -672,22 +1193,22 @@ function DatasetProfileView({ profile }: { readonly profile: DatasetProfile }): 
             </div>
             <dl className="compact-kv">
               <div>
-                <dt>Missing</dt>
+                <dt>{copy.missing}</dt>
                 <dd>{Math.round(field.missingRatio * 100)}%</dd>
               </div>
               <div>
-                <dt>Distinct</dt>
+                <dt>{copy.distinct}</dt>
                 <dd>{field.distinctCount}</dd>
               </div>
               {typeof field.average === "number" ? (
                 <div>
-                  <dt>Average</dt>
+                  <dt>{copy.average}</dt>
                   <dd>{formatNumber(field.average)}</dd>
                 </div>
               ) : null}
               {field.topValues?.[0] ? (
                 <div>
-                  <dt>Top</dt>
+                  <dt>{copy.top}</dt>
                   <dd>
                     {field.topValues[0].value} ({field.topValues[0].count})
                   </dd>
@@ -703,9 +1224,11 @@ function DatasetProfileView({ profile }: { readonly profile: DatasetProfile }): 
 
 function SqlQueryResultView({
   result,
+  copy,
   onExport
 }: {
   readonly result: SqlQueryResult;
+  readonly copy: UiCopy;
   readonly onExport: () => void;
 }): ReactElement {
   return (
@@ -717,11 +1240,11 @@ function SqlQueryResultView({
           <span>{result.durationMs} ms</span>
         </div>
         <button type="button" className="ghost-button" onClick={onExport}>
-          Export CSV
+          {copy.exportCsv}
         </button>
       </div>
       {result.rows.length === 0 ? (
-        <p className="subtle small">Query completed without returning rows.</p>
+        <p className="subtle small">{copy.queryEmpty}</p>
       ) : (
         <div className="result-table-wrap">
           <table className="result-table">
@@ -750,11 +1273,13 @@ function SqlQueryResultView({
 
 function SqlHistoryView({
   history,
+  copy,
   onReuse,
   onExport,
   onClear
 }: {
   readonly history: readonly SqlHistoryEntry[];
+  readonly copy: UiCopy;
   readonly onReuse: (entry: SqlHistoryEntry) => void;
   readonly onExport: (entry: SqlHistoryEntry) => void;
   readonly onClear: () => void;
@@ -763,10 +1288,10 @@ function SqlHistoryView({
     return (
       <div className="result-box">
         <div className="history-header">
-          <strong>Recent Queries</strong>
-          <span className="subtle small">Stores the last {MAX_SQL_HISTORY_ENTRIES} successful runs in this browser.</span>
+          <strong>{copy.recentQueries}</strong>
+          <span className="subtle small">{copy.historyStores(MAX_SQL_HISTORY_ENTRIES)}</span>
         </div>
-        <p className="subtle small">Run a query to create a reusable history entry.</p>
+        <p className="subtle small">{copy.historyEmpty}</p>
       </div>
     );
   }
@@ -774,10 +1299,10 @@ function SqlHistoryView({
   return (
     <div className="result-box">
       <div className="history-header">
-        <strong>Recent Queries</strong>
+        <strong>{copy.recentQueries}</strong>
         <div className="button-row">
           <button type="button" className="ghost-button" onClick={onClear}>
-            Clear History
+            {copy.clearHistory}
           </button>
         </div>
       </div>
@@ -786,9 +1311,7 @@ function SqlHistoryView({
           <article key={entry.id} className="history-item">
             <div className="history-copy">
               <strong className="mono">{buildSqlPreview(entry.sql)}</strong>
-              <span className="subtle small">
-                {entry.result.rowCount} rows, {entry.result.columns.length} columns, {entry.result.durationMs} ms
-              </span>
+              <span className="subtle small">{copy.querySummary(entry.result.rowCount, entry.result.columns.length, entry.result.durationMs)}</span>
               <span className="subtle small">{formatHistoryTimestamp(entry.executedAt)}</span>
             </div>
             <div className="button-row">
@@ -799,7 +1322,7 @@ function SqlHistoryView({
                   onReuse(entry);
                 }}
               >
-                Reuse
+                {copy.reuse}
               </button>
               <button
                 type="button"
@@ -851,20 +1374,22 @@ function getLatestUsage(messages: readonly ChatMessage[]): UsageSummary | undefi
 }
 
 export default function App(): ReactElement {
+  const [language, setLanguage] = useState<Language>("zh");
+  const [activeView, setActiveView] = useState<ViewMode>("workbench");
+  const copy = getCopy(language);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
       role: "assistant",
-      content:
-        "Agent core is online. Ask me to validate SQL, summarize a numeric series, or suggest a chart.",
+      content: getCopy("zh").welcomeMessage,
       status: "complete"
     }
   ]);
   const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
   const [composerValue, setComposerValue] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [statusText, setStatusText] = useState("loading overview");
+  const [statusText, setStatusText] = useState(copy.loadingOverview);
   const [isStreaming, setIsStreaming] = useState(false);
   const [sqlValue, setSqlValue] = useState(DEFAULT_SQL);
   const [sqlResult, setSqlResult] = useState<SqlValidationResult | null>(null);
@@ -888,21 +1413,34 @@ export default function App(): ReactElement {
   );
 
   useEffect(() => {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === "welcome"
+          ? {
+              ...message,
+              content: copy.welcomeMessage
+            }
+          : message
+      )
+    );
+  }, [copy]);
+
+  useEffect(() => {
     const loadOverview = async (): Promise<void> => {
       try {
         const payload = await requestJson<OverviewResponse>("/api/overview");
         setOverview(payload);
-        setStatusText(payload.agent.configured ? "connected to agent api" : "agent requires credentials");
+        setStatusText(payload.agent.configured ? copy.connectedStatus : copy.credentialsStatus);
       } catch (error) {
         const message = safeErrorMessage(error);
         logger.error("failed to load overview", { error: message });
         setErrorMessage(message);
-        setStatusText("overview failed");
+        setStatusText(copy.overviewFailedStatus);
       }
     };
 
     void loadOverview();
-  }, []);
+  }, [copy]);
 
   useEffect(() => {
     try {
@@ -944,7 +1482,7 @@ export default function App(): ReactElement {
   const applyStreamEvent = (assistantId: string, event: ChatStreamEvent): void => {
     switch (event.type) {
       case "session.started":
-        setStatusText(`streaming with ${event.model}`);
+        setStatusText(copy.streamWithModel(event.model));
         return;
       case "response.output_text.delta":
         setMessages((current) =>
@@ -995,7 +1533,7 @@ export default function App(): ReactElement {
               : message
           )
         );
-        setStatusText("response complete");
+        setStatusText(copy.responseCompleteStatus);
         return;
       case "response.failed":
         setMessages((current) =>
@@ -1010,7 +1548,7 @@ export default function App(): ReactElement {
           )
         );
         setErrorMessage(event.error);
-        setStatusText("response failed");
+        setStatusText(copy.responseFailedStatus);
     }
   };
 
@@ -1052,7 +1590,7 @@ export default function App(): ReactElement {
             : entry
         )
       );
-      setStatusText("request failed");
+      setStatusText(copy.requestFailedStatus);
     } finally {
       setIsStreaming(false);
     }
@@ -1111,7 +1649,7 @@ export default function App(): ReactElement {
       entryId: entry.id,
       rowCount: entry.result.rowCount
     });
-    setStatusText("loaded query from history");
+    setStatusText(copy.loadedHistoryStatus);
   };
 
   const handleExportSqlResult = (entry?: SqlHistoryEntry): void => {
@@ -1127,7 +1665,7 @@ export default function App(): ReactElement {
         rowCount: result.rowCount,
         columnCount: result.columns.length
       });
-      setStatusText("query exported");
+      setStatusText(copy.queryExportedStatus);
       setErrorMessage(null);
     } catch (error) {
       const message = safeErrorMessage(error);
@@ -1140,7 +1678,7 @@ export default function App(): ReactElement {
     setSqlHistory([]);
     clearStoredSqlHistory();
     logger.info("sql history cleared");
-    setStatusText("query history cleared");
+    setStatusText(copy.historyClearedStatus);
   };
 
   const handleProfileDataset = async (): Promise<void> => {
@@ -1151,7 +1689,7 @@ export default function App(): ReactElement {
       const parsedRows = JSON.parse(datasetValue) as unknown;
 
       if (!Array.isArray(parsedRows)) {
-        throw new Error("Dataset input must be a JSON array");
+        throw new Error(copy.datasetArrayError);
       }
 
       const profile = await profileDataset(parsedRows as Readonly<Record<string, unknown>>[]);
@@ -1204,6 +1742,8 @@ export default function App(): ReactElement {
 
   return (
     <AppShell
+      language={language}
+      activeView={activeView}
       overview={overview}
       messages={messages}
       toolActivity={toolActivity}
@@ -1262,8 +1802,25 @@ export default function App(): ReactElement {
       onCheckAccess={() => {
         void handleCheckAccess();
       }}
+      onLanguageChange={setLanguage}
+      onViewChange={setActiveView}
     />
   );
+}
+
+function buildWorkflowMermaid(steps: readonly string[]): string {
+  const [user, workbench, api, tools, metadataSql, analysisCharts, decision] = steps;
+
+  return [
+    "flowchart LR",
+    `  A["${user}"] --> B["${workbench}"]`,
+    `  B --> C["${api}"]`,
+    `  C --> D["${tools}"]`,
+    `  D --> E["${metadataSql}"]`,
+    `  D --> F["${analysisCharts}"]`,
+    `  E --> G["${decision}"]`,
+    `  F --> G`
+  ].join("\n");
 }
 
 function readStoredSqlHistory(): SqlHistoryEntry[] {

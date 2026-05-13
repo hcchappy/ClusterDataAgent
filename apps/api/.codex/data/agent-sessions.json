@@ -1,4 +1,65 @@
 {
   "version": 1,
-  "sessions": {}
+  "sessions": {
+    "debug-order-count": [
+      {
+        "role": "user",
+        "content": "????????"
+      },
+      {
+        "role": "assistant",
+        "content": "I’m not sure what you need yet. Please send your question or task, and I’ll help."
+      }
+    ],
+    "demo": [
+      {
+        "role": "user",
+        "content": "订单中有多少记录"
+      },
+      {
+        "role": "assistant",
+        "content": "订单表 `cda_orders` 中共有 **1 条记录**。"
+      }
+    ],
+    "final-verify-730751120": [
+      {
+        "role": "user",
+        "content": "\\u8ba2\\u5355\\u4e2d\\u6709\\u591a\\u5c11\\u8bb0\\u5f55"
+      },
+      {
+        "role": "assistant",
+        "content": "订单表 `cda_orders` 里有 **1 条记录**。"
+      }
+    ],
+    "verify-after-limit-83358901": [
+      {
+        "role": "user",
+        "content": "\\u8ba2\\u5355\\u4e2d\\u6709\\u591a\\u5c11\\u8bb0\\u5f55"
+      },
+      {
+        "role": "assistant",
+        "content": "订单表 `cda_orders` 里有 **1 条记录**。  \n依据：`SELECT COUNT(*) AS count FROM cda_orders;`"
+      }
+    ],
+    "verify-stream-after-limit-418888670": [
+      {
+        "role": "user",
+        "content": "\\u8ba2\\u5355\\u4e2d\\u6709\\u591a\\u5c11\\u8bb0\\u5f55"
+      },
+      {
+        "role": "assistant",
+        "content": "订单表 `cda_orders` 共有 **1** 条记录。"
+      }
+    ],
+    "web-bbc89c64-871e-4a26-8ba3-82593799450f": [
+      {
+        "role": "user",
+        "content": "订单中有多少记录"
+      },
+      {
+        "role": "assistant",
+        "content": "订单表 `cda_orders` 中共有 **1 条记录**。"
+      }
+    ]
+  }
 }
