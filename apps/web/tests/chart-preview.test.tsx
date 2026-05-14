@@ -137,6 +137,27 @@ describe("chart preview", () => {
     expect(tableHtml).toContain("north");
   });
 
+  it("renders light themed chart previews", () => {
+    const html = renderToStaticMarkup(
+      <ChartRecommendationPreview
+        recommendation={{
+          kind: "line",
+          title: "revenue over createdAt",
+          dimensions: ["createdAt"],
+          metrics: ["revenue"],
+          score: 0.95,
+          reason: "Trend analysis"
+        }}
+        rows={sampleRows}
+        profile={sampleProfile}
+        theme="light"
+      />
+    );
+
+    expect(html).toContain("chart-preview-light");
+    expect(html).toContain('stroke="#cbd5e1"');
+  });
+
   it("shows an empty preview state when no rows are available", () => {
     const html = renderToStaticMarkup(
       <ChartRecommendationPreview

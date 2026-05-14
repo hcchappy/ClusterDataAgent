@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   checkAccess,
   executeSqlQuery,
+  requestJson,
   parseSseStream,
   profileDataset,
   recommendCharts,
@@ -278,6 +279,19 @@ describe("web api helpers", () => {
           action: "write"
         })
       })
+    );
+  });
+
+  it("reports non-JSON API responses with the requested URL", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<!doctype html><title>Vite App</title>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+
+    await expect(requestJson("/api/overview")).rejects.toThrow(
+      "Expected JSON from http://127.0.0.1:3001/api/overview"
     );
   });
 });

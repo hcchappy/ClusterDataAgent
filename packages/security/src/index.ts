@@ -623,9 +623,20 @@ export function assertChartRequestSecurity(
     readonly values?: unknown;
     readonly profile?: unknown;
     readonly maxRecommendations?: unknown;
+    readonly theme?: unknown;
   },
   policy = DEFAULT_REQUEST_SECURITY_POLICY
 ): void {
+  if (
+    typeof input.theme !== "undefined" &&
+    input.theme !== "dark" &&
+    input.theme !== "light"
+  ) {
+    rejectSecurityInput("theme must be dark or light", "INVALID_CHART_THEME", {
+      allowedThemes: ["dark", "light"]
+    });
+  }
+
   if (typeof input.maxRecommendations !== "undefined") {
     assertPositiveIntegerLimit(
       input.maxRecommendations,

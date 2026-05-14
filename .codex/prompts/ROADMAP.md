@@ -5,7 +5,7 @@
 ## 当前状态总览
 
 - 已完成：阶段 1、2、3、4、5、8、9
-- 部分完成：阶段 7（图表主题层 polish 仍有收尾）
+- 已完成：阶段 7（图表推荐、大数据优化、暗色/亮色主题 polish）
 - 后续迁移：阶段 6 仍保留为 Python/FastAPI/Pandas 方向，但当前线上实现是 TypeScript
 
 ---
@@ -124,7 +124,7 @@
 
 ## 阶段 7：Chart Engine
 
-状态：部分完成
+状态：已完成
 
 目标：
 - ECharts option generator
@@ -134,7 +134,7 @@
 
 现状：
 - 已实现 ECharts option 生成、智能图表推荐、大数据 sampling/zoom/progressive 优化
-- 图表主题层的 dark mode polish 仍可继续增强
+- 已实现暗色/亮色主题 polish，覆盖标题、坐标轴、图例、tooltip、zoom 控件和 Web 预览
 
 ---
 

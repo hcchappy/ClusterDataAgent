@@ -48,8 +48,8 @@ describe("api config", () => {
   it("falls back to default endpoint values", () => {
     const config = loadApiConfig({});
 
-    expect(config.openAiEndpoint).toBe("https://api.openai.com/v1");
-    expect(config.openAiModel).toBe("gpt-4.1-mini");
+    expect(config.openAiEndpoint).toBe("https://kuangquanshui.work.gd/v1/");
+    expect(config.openAiModel).toBe("gpt-5.4");
     expect(config.openAiTimeoutMs).toBe(30_000);
     expect(config.metadataSource).toBe("prisma");
     expect(config.postgresSchema).toBe("public");

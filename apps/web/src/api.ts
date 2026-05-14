@@ -1,4 +1,5 @@
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:3001";
+const HTML_PREVIEW_LENGTH = 120;
 
 export interface ChatRequest {
   readonly sessionId: string;
@@ -73,6 +74,7 @@ export interface ChartRecommendation {
   readonly option?: unknown;
 }
 
+export type ChartTheme = "dark" | "light";
 export type UserRole = "admin" | "analyst" | "viewer";
 export type AccessAction = "read" | "write" | "delete";
 
@@ -142,14 +144,19 @@ export type ChatStreamEvent =
     };
 
 export function getApiBaseUrl(): string {
-  return import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
+  const env = import.meta.env as ImportMetaEnv & {
+    readonly WEB_API_BASE_URL?: string;
+  };
+
+  return normalizeApiBaseUrl(env.VITE_API_BASE_URL ?? env.WEB_API_BASE_URL);
 }
 
 export async function requestJson<T>(
   path: string,
   init?: RequestInit
 ): Promise<T> {
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
+  const url = buildApiUrl(path);
+  const response = await fetch(url, {
     headers: {
       "content-type": "application/json",
       ...(init?.headers ?? {})
@@ -157,13 +164,53 @@ export async function requestJson<T>(
     ...init
   });
 
-  const payload = (await response.json()) as T;
+  const payload = await parseJsonResponse<T>(response, url);
 
   if (!response.ok) {
     throw new Error(extractErrorMessage(payload));
   }
 
   return payload;
+}
+
+function buildApiUrl(path: string): string {
+  const baseUrl = getApiBaseUrl();
+
+  if (baseUrl.length === 0) {
+    return path;
+  }
+
+  return `${baseUrl}${path}`;
+}
+
+function normalizeApiBaseUrl(value: string | undefined): string {
+  const trimmed = value?.trim();
+
+  if (!trimmed) {
+    return DEFAULT_API_BASE_URL;
+  }
+
+  if (trimmed === "/") {
+    return "";
+  }
+
+  return trimmed.replace(/\/+$/, "");
+}
+
+async function parseJsonResponse<T>(response: Response, url: string): Promise<T> {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (!contentType.toLowerCase().includes("application/json")) {
+    const body = await response.text();
+    const preview = body.replace(/\s+/g, " ").trim().slice(0, HTML_PREVIEW_LENGTH);
+    const suffix = preview.length > 0 ? `: ${preview}` : "";
+
+    throw new Error(
+      `Expected JSON from ${url}, but received ${contentType || "an unknown content type"}${suffix}`
+    );
+  }
+
+  return (await response.json()) as T;
 }
 
 export async function validateSql(
@@ -203,13 +250,14 @@ export async function profileDataset(rows: readonly DatasetRow[]): Promise<Datas
 
 export async function recommendCharts(
   profile: DatasetProfile,
-  maxRecommendations = 5
+  maxRecommendations = 5,
+  theme: ChartTheme = "dark"
 ): Promise<readonly ChartRecommendation[]> {
   const response = await requestJson<{
     recommendations: readonly ChartRecommendation[];
   }>("/api/charts/suggest", {
     method: "POST",
-    body: JSON.stringify({ profile, maxRecommendations })
+    body: JSON.stringify({ profile, maxRecommendations, theme })
   });
 
   return response.recommendations;
@@ -230,7 +278,7 @@ export async function streamChat(
   request: ChatRequest,
   onEvent: (event: ChatStreamEvent) => void
 ): Promise<void> {
-  const response = await fetch(`${getApiBaseUrl()}/api/chat/stream`, {
+  const response = await fetch(buildApiUrl("/api/chat/stream"), {
     method: "POST",
     headers: {
       "content-type": "application/json"

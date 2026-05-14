@@ -24,6 +24,53 @@ describe("chart-engine", () => {
     expect(option.series[0].type).toBe("bar");
   });
 
+  it("applies light and dark chart theme polish", () => {
+    const darkOption = buildEChartsOption("Revenue", ["Jan"], [10], "bar", {
+      theme: "dark"
+    });
+    const lightOption = buildEChartsOption("Revenue", ["Jan"], [10], "bar", {
+      theme: "light"
+    });
+
+    expect(darkOption).toMatchObject({
+      backgroundColor: "#0d1219",
+      title: {
+        left: "center",
+        textStyle: {
+          color: "#e7ecf3"
+        }
+      },
+      tooltip: {
+        backgroundColor: "#10151d",
+        borderWidth: 1
+      },
+      xAxis: {
+        axisLabel: {
+          hideOverlap: true
+        }
+      },
+      meta: {
+        theme: "dark"
+      }
+    });
+    expect(lightOption).toMatchObject({
+      backgroundColor: "#ffffff",
+      textStyle: {
+        color: "#4b5563"
+      },
+      yAxis: {
+        splitLine: {
+          lineStyle: {
+            color: "#e2e8f0"
+          }
+        }
+      },
+      meta: {
+        theme: "light"
+      }
+    });
+  });
+
   it("optimizes large category series with sampling and zoom metadata", () => {
     const labels = Array.from({ length: 240 }, (_unused, index) => `Day ${index + 1}`);
     const values = labels.map((_label, index) => index + 1);
@@ -42,6 +89,10 @@ describe("chart-engine", () => {
       progressive: 500
     });
     expect(option.dataZoom).toHaveLength(2);
+    expect(option.dataZoom?.[1]).toMatchObject({
+      backgroundColor: "#10151d",
+      fillerColor: "rgba(135, 163, 255, 0.24)"
+    });
     expect(option.animation).toBe(false);
   });
 
@@ -102,6 +153,24 @@ describe("chart-engine", () => {
       metrics: ["revenue"]
     });
     expect(comparison?.option?.series[0].data).toEqual([2, 1]);
+  });
+
+  it("passes the requested theme into profile recommendation options", () => {
+    const profile = profileDataset({
+      rows: [
+        { region: "north", revenue: 10 },
+        { region: "south", revenue: 20 }
+      ]
+    });
+    const recommendations = recommendChartsFromProfile({ profile, theme: "light" });
+    const comparison = recommendations.find(
+      (recommendation) => recommendation.title === "revenue by region"
+    );
+
+    expect(comparison?.option?.meta).toMatchObject({
+      theme: "light"
+    });
+    expect(comparison?.option?.backgroundColor).toBe("#ffffff");
   });
 
   it("recommends numeric distribution charts", () => {

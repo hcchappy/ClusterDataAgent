@@ -20,7 +20,8 @@ import {
 import {
   buildEChartsOption,
   chooseChartKind,
-  recommendChartsFromProfile
+  recommendChartsFromProfile,
+  type ChartTheme
 } from "@clusterdata/chart-engine";
 import {
   PostgresReadOnlyQueryExecutor,
@@ -777,6 +778,7 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       labels?: readonly string[];
       values?: readonly number[];
       hasTimeAxis?: boolean;
+      theme?: ChartTheme;
       profile?: ReturnType<typeof profileDataset>;
       maxRecommendations?: number;
     };
@@ -786,13 +788,15 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     if (body?.profile) {
       const recommendations = recommendChartsFromProfile({
         profile: body.profile,
-        maxRecommendations: body.maxRecommendations
+        maxRecommendations: body.maxRecommendations,
+        theme: body.theme
       });
 
       app.log.info(
         {
           recommendationCount: recommendations.length,
-          profileFieldCount: body.profile.fieldCount
+          profileFieldCount: body.profile.fieldCount,
+          theme: body.theme ?? "dark"
         },
         "profile-aware chart recommendations generated"
       );
@@ -819,7 +823,9 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
 
     return {
       kind,
-      option: buildEChartsOption(body.title, body.labels, body.values, kind)
+      option: buildEChartsOption(body.title, body.labels, body.values, kind, {
+        theme: body.theme
+      })
     };
   });
 
@@ -1206,7 +1212,12 @@ export function buildToolRegistry(
           type: "array",
           items: { type: "number" }
         },
-        hasTimeAxis: { type: "boolean" }
+        hasTimeAxis: { type: "boolean" },
+        theme: {
+          type: "string",
+          enum: ["dark", "light"],
+          description: "Chart theme used for generated option styling"
+        }
       },
       required: ["title", "labels", "values", "hasTimeAxis"],
       additionalProperties: false
@@ -1220,6 +1231,7 @@ export function buildToolRegistry(
       labels: readonly string[];
       values: readonly number[];
       hasTimeAxis: boolean;
+      theme?: ChartTheme;
     }) => {
       const kind = chooseChartKind({
         dimensions: input.labels.length > 0 ? ["category"] : [],
@@ -1229,7 +1241,9 @@ export function buildToolRegistry(
 
       return {
         kind,
-        option: buildEChartsOption(input.title, input.labels, input.values, kind)
+        option: buildEChartsOption(input.title, input.labels, input.values, kind, {
+          theme: input.theme
+        })
       };
     }
   });
@@ -1244,7 +1258,12 @@ export function buildToolRegistry(
           type: "object",
           additionalProperties: true
         },
-        maxRecommendations: { type: "integer" }
+        maxRecommendations: { type: "integer" },
+        theme: {
+          type: "string",
+          enum: ["dark", "light"],
+          description: "Chart theme used for generated recommendation options"
+        }
       },
       required: ["profile"],
       additionalProperties: false
@@ -1256,10 +1275,12 @@ export function buildToolRegistry(
     execute: (input: {
       profile: ReturnType<typeof profileDataset>;
       maxRecommendations?: number;
+      theme?: ChartTheme;
     }) =>
       recommendChartsFromProfile({
         profile: input.profile,
-        maxRecommendations: input.maxRecommendations
+        maxRecommendations: input.maxRecommendations,
+        theme: input.theme
       })
   });
 

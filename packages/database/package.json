@@ -8,8 +8,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "db:generate": "prisma generate --schema=prisma/schema.prisma",
-    "db:validate": "prisma validate --schema=prisma/schema.prisma",
+    "db:generate": "prisma generate --config=prisma.config.ts",
+    "db:validate": "prisma validate --config=prisma.config.ts",
     "lint": "eslint src tests",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

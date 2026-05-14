@@ -18,6 +18,12 @@
      - `docker compose up -d postgres`
    - Optional test schema fixture:
      - `packages/database/prisma/postgres-test-schema.sql`
+     - Prisma CLI validation/generation uses `packages/database/prisma.config.ts`, which reads `DATABASE_URL` and falls back to the preferred local test URL.
+     - Validate Prisma configuration with `pnpm db:validate`.
+     - Apply it with `psql "postgresql://postgres:aa@127.0.0.1:5432/clusterdata" -f packages/database/prisma/postgres-test-schema.sql`.
+     - The fixture resets the demo `cda_*` tables and loads 8 customers, 80 orders, and order lifecycle events.
+     - Orders cover `2026-04-25` through `2026-05-14` with exactly 4 orders per day, which is useful for SQL joins, dataset profiling, and chart trend previews.
+     - Verify the order distribution with `select created_at::date, count(*) from cda_orders group by created_at::date order by created_at::date;`.
 
 3. Start the project
    - `pnpm dev`
@@ -27,6 +33,7 @@
    - API: `http://127.0.0.1:3001/health`
    - Overview: `http://127.0.0.1:3001/api/overview`
    - The web workbench includes streaming chat, SQL Guardrail, Access Check, Dataset Profile, and Chart Recommendations panels.
+   - The Docs tab includes a detailed usage manual, direct API examples, and an optimized workflow diagram.
 
 5. Enable chat endpoints
    - Set `OPENAI_API_KEY` in your environment or `.env`
@@ -89,16 +96,23 @@
    - Legacy chart suggestion:
      - `curl -X POST http://127.0.0.1:3001/api/charts/suggest -H "content-type: application/json" -d "{\"title\":\"Revenue\",\"labels\":[\"Jan\",\"Feb\"],\"values\":[10,20],\"hasTimeAxis\":false}"`
    - Profile-aware chart recommendations:
-     - Call `POST /api/analysis/profile` first, then pass the returned `profile` to `POST /api/charts/suggest` with optional `maxRecommendations`.
+     - Call `POST /api/analysis/profile` first, then pass the returned `profile` to `POST /api/charts/suggest` with optional `maxRecommendations` and `theme`.
    - The chart engine recommends time series, category comparisons, numeric distributions, outlier scatter views, or a table fallback depending on the dataset profile.
    - Large legacy chart payloads are sampled automatically, expose optimization metadata in `option.meta`, and add zoom/progressive rendering hints for dense series.
+   - Chart options and web previews support polished `dark` and `light` themes for titles, axes, legends, tooltips, zoom controls, and preview surfaces.
 
 10. Try the web workbench
    - Open `http://127.0.0.1:3000`.
+   - Keep the API running at `http://127.0.0.1:3001`; Agent Overview reads `/api/overview` and shows a clear failure message if the API is unreachable.
+   - Set `VITE_API_BASE_URL` or `WEB_API_BASE_URL` to `http://127.0.0.1:3001`, then restart the web dev server.
+   - The web dev server uses strict port `3000`; if that port is occupied, stop the old web process instead of letting Vite start on `3001`.
+   - Use the Vite dev proxy only when needed by setting `WEB_ENABLE_API_PROXY=true` and optionally `WEB_API_PROXY_TARGET=http://127.0.0.1:3001`.
+   - Open the Docs tab to review the detailed manual, API examples, and workflow diagram.
    - Ask the chat panel for a markdown-formatted answer to verify heading, list, code, and link rendering.
    - Paste a bounded SELECT in SQL Guardrail and click `Validate SQL`.
    - Use Access Check to test role, tenant, resource tenant, and action decisions.
    - Paste JSON rows in Dataset Profile and click `Run Profile`.
+   - Choose a Chart Theme when reviewing recommendations.
    - Click `Recommend Charts` to turn the profile into chart recommendations.
    - The chart recommendation cards now render inline previews from the profiled dataset rows and sample oversized series so previews stay responsive.
 
@@ -110,3 +124,4 @@
 12. Run the shared repository gate
    - `pnpm verify`
    - This is the same lint + typecheck + test sequence enforced by the Husky `pre-commit` hook.
+   - Turbo is configured with no-output defaults for TypeScript check tasks and a web-specific `dist/**` build output, so normal verification should not emit missing-output cache warnings.

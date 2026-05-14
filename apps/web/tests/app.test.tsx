@@ -191,6 +191,7 @@ describe("web app", () => {
             reason: "Low-cardinality categories are good for comparison charts"
           }
         ]}
+        chartTheme="dark"
         isProfilingDataset={false}
         isRecommendingCharts={false}
         securityCheck={{
@@ -208,6 +209,7 @@ describe("web app", () => {
         onDatasetChange={() => {}}
         onProfileDataset={() => {}}
         onRecommendCharts={() => {}}
+        onChartThemeChange={() => {}}
         onSecurityCheckChange={() => {}}
         onCheckAccess={() => {}}
         onLanguageChange={() => {}}
@@ -278,6 +280,7 @@ describe("web app", () => {
         datasetRows={[]}
         datasetProfile={null}
         chartRecommendations={[]}
+        chartTheme="dark"
         isProfilingDataset={false}
         isRecommendingCharts={false}
         securityCheck={{
@@ -291,6 +294,7 @@ describe("web app", () => {
         onDatasetChange={() => {}}
         onProfileDataset={() => {}}
         onRecommendCharts={() => {}}
+        onChartThemeChange={() => {}}
         onSecurityCheckChange={() => {}}
         onCheckAccess={() => {}}
         onLanguageChange={() => {}}
@@ -306,6 +310,66 @@ describe("web app", () => {
     expect(html).toContain("访问检查");
     expect(html).toContain("数据集画像");
     expect(html).toContain("推荐图表");
+  });
+
+  it("renders an overview failure instead of an endless loading state", () => {
+    const html = renderToString(
+      <AppShell
+        language="en"
+        activeView="workbench"
+        overview={null}
+        messages={[]}
+        toolActivity={[]}
+        composerValue=""
+        isStreaming={false}
+        errorMessage="Unable to connect to the API server"
+        statusText="overview failed"
+        onComposerChange={() => {}}
+        onSend={() => {}}
+        onPromptSelect={() => {}}
+        sqlValue="select id from Tenant limit 20"
+        sqlRole="analyst"
+        sqlResult={null}
+        isValidatingSql={false}
+        sqlQueryResult={null}
+        sqlHistory={[]}
+        isRunningSql={false}
+        onSqlChange={() => {}}
+        onSqlRoleChange={() => {}}
+        onValidateSql={() => {}}
+        onRunSql={() => {}}
+        onReuseSqlHistory={() => {}}
+        onExportSqlResult={() => {}}
+        onClearSqlHistory={() => {}}
+        datasetValue="[]"
+        datasetRows={[]}
+        datasetProfile={null}
+        chartRecommendations={[]}
+        chartTheme="dark"
+        isProfilingDataset={false}
+        isRecommendingCharts={false}
+        securityCheck={{
+          role: "analyst",
+          tenantId: "tenant-a",
+          resourceTenantId: "tenant-a",
+          action: "read"
+        }}
+        securityDecision={null}
+        isCheckingAccess={false}
+        onDatasetChange={() => {}}
+        onProfileDataset={() => {}}
+        onRecommendCharts={() => {}}
+        onChartThemeChange={() => {}}
+        onSecurityCheckChange={() => {}}
+        onCheckAccess={() => {}}
+        onLanguageChange={() => {}}
+        onViewChange={() => {}}
+      />
+    );
+
+    expect(html).toContain("overview failed");
+    expect(html).toContain("Unable to connect to the API server");
+    expect(html).not.toContain("Loading workspace summary...");
   });
 
   it("renders the documentation page with tutorials and flow source", () => {
@@ -341,6 +405,7 @@ describe("web app", () => {
         datasetRows={[]}
         datasetProfile={null}
         chartRecommendations={[]}
+        chartTheme="dark"
         isProfilingDataset={false}
         isRecommendingCharts={false}
         securityCheck={{
@@ -354,6 +419,7 @@ describe("web app", () => {
         onDatasetChange={() => {}}
         onProfileDataset={() => {}}
         onRecommendCharts={() => {}}
+        onChartThemeChange={() => {}}
         onSecurityCheckChange={() => {}}
         onCheckAccess={() => {}}
         onLanguageChange={() => {}}
@@ -365,6 +431,14 @@ describe("web app", () => {
     expect(html).toContain("使用教程");
     expect(html).toContain("接口调用教程");
     expect(html).toContain("流程图");
+    expect(html).toContain("详细使用文档");
+    expect(html).toContain("SQL 护栏");
+    expect(html).toContain("图表推荐");
+    expect(html).toContain("/api/charts/suggest");
+    expect(html).toContain("/api/security/check");
+    expect(html).toContain("prompt-injection signals");
+    expect(html).toContain("分析与图表");
+    expect(html).toContain("flow-map");
     expect(html).toContain("flowchart LR");
     expect(html).toContain("/api/chat/stream");
   });

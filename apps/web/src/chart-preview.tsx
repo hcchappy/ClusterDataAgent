@@ -1,5 +1,5 @@
 import { type ReactElement } from "react";
-import type { ChartRecommendation, DatasetProfile, DatasetRow } from "./api.js";
+import type { ChartRecommendation, ChartTheme, DatasetProfile, DatasetRow } from "./api.js";
 
 interface CategorySeriesModel {
   readonly kind: "line" | "bar" | "histogram";
@@ -56,20 +56,46 @@ const PREVIEW_COLORS = [
   "#7aa2f7"
 ] as const;
 
+const PREVIEW_THEME_TOKENS: Record<
+  ChartTheme,
+  {
+    readonly className: string;
+    readonly axis: string;
+    readonly track: string;
+    readonly tableClassName: string;
+  }
+> = {
+  dark: {
+    className: "chart-preview chart-preview-dark",
+    axis: "#32415b",
+    track: "#243044",
+    tableClassName: "chart-preview chart-preview-dark chart-preview-table"
+  },
+  light: {
+    className: "chart-preview chart-preview-light",
+    axis: "#cbd5e1",
+    track: "#e2e8f0",
+    tableClassName: "chart-preview chart-preview-light chart-preview-table"
+  }
+};
+
 export function ChartRecommendationPreview({
   recommendation,
   rows,
-  profile
+  profile,
+  theme = "dark"
 }: {
   readonly recommendation: ChartRecommendation;
   readonly rows: readonly DatasetRow[];
   readonly profile?: DatasetProfile | null;
+  readonly theme?: ChartTheme;
 }): ReactElement {
   const preview = buildChartPreviewModel(recommendation, rows, profile ?? undefined);
+  const tokens = PREVIEW_THEME_TOKENS[theme];
 
   if (!preview) {
     return (
-      <div className="chart-preview chart-preview-empty">
+      <div className={`${tokens.className} chart-preview-empty`}>
         <p className="subtle small">
           Preview becomes available after a dataset profile has loaded row data.
         </p>
@@ -78,18 +104,18 @@ export function ChartRecommendationPreview({
   }
 
   if (preview.kind === "table") {
-    return <TablePreview model={preview} />;
+    return <TablePreview model={preview} theme={theme} />;
   }
 
   if (preview.kind === "pie") {
-    return <PiePreview model={preview} />;
+    return <PiePreview model={preview} theme={theme} />;
   }
 
   if (preview.kind === "scatter") {
-    return <ScatterPreview model={preview} />;
+    return <ScatterPreview model={preview} theme={theme} />;
   }
 
-  return <CartesianPreview model={preview} />;
+  return <CartesianPreview model={preview} theme={theme} />;
 }
 
 export function buildChartPreviewModel(
@@ -150,10 +176,13 @@ export function buildChartPreviewModel(
 }
 
 function CartesianPreview({
-  model
+  model,
+  theme
 }: {
   readonly model: CategorySeriesModel;
+  readonly theme: ChartTheme;
 }): ReactElement {
+  const tokens = PREVIEW_THEME_TOKENS[theme];
   const width = 320;
   const height = 180;
   const padding = 18;
@@ -174,15 +203,27 @@ function CartesianPreview({
     .join(" ");
 
   return (
-    <div className="chart-preview">
+    <div className={tokens.className}>
       <svg
         className="chart-svg"
         viewBox={`0 0 ${width} ${height}`}
         role="img"
         aria-label={`${model.title} preview`}
       >
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} />
-        <line x1={padding} y1={padding} x2={padding} y2={height - padding} />
+        <line
+          x1={padding}
+          y1={height - padding}
+          x2={width - padding}
+          y2={height - padding}
+          stroke={tokens.axis}
+        />
+        <line
+          x1={padding}
+          y1={padding}
+          x2={padding}
+          y2={height - padding}
+          stroke={tokens.axis}
+        />
         {model.kind === "line" ? (
           <>
             <polyline
@@ -241,10 +282,13 @@ function CartesianPreview({
 }
 
 function PiePreview({
-  model
+  model,
+  theme
 }: {
   readonly model: PieSeriesModel;
+  readonly theme: ChartTheme;
 }): ReactElement {
+  const tokens = PREVIEW_THEME_TOKENS[theme];
   const radius = 54;
   const center = 72;
   const circumference = 2 * Math.PI * radius;
@@ -252,7 +296,7 @@ function PiePreview({
   let offset = 0;
 
   return (
-    <div className="chart-preview chart-preview-split">
+    <div className={`${tokens.className} chart-preview-split`}>
       <svg
         className="chart-svg chart-svg-pie"
         viewBox="0 0 144 144"
@@ -264,7 +308,7 @@ function PiePreview({
           cy={center}
           r={radius}
           fill="none"
-          stroke="#243044"
+          stroke={tokens.track}
           strokeWidth="18"
         />
         {model.slices.map((slice) => {
@@ -308,10 +352,13 @@ function PiePreview({
 }
 
 function ScatterPreview({
-  model
+  model,
+  theme
 }: {
   readonly model: ScatterSeriesModel;
+  readonly theme: ChartTheme;
 }): ReactElement {
+  const tokens = PREVIEW_THEME_TOKENS[theme];
   const width = 320;
   const height = 180;
   const padding = 18;
@@ -323,15 +370,27 @@ function ScatterPreview({
   const yRange = Math.max(maxY - minY, 1);
 
   return (
-    <div className="chart-preview">
+    <div className={tokens.className}>
       <svg
         className="chart-svg"
         viewBox={`0 0 ${width} ${height}`}
         role="img"
         aria-label={`${model.title} preview`}
       >
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} />
-        <line x1={padding} y1={padding} x2={padding} y2={height - padding} />
+        <line
+          x1={padding}
+          y1={height - padding}
+          x2={width - padding}
+          y2={height - padding}
+          stroke={tokens.axis}
+        />
+        <line
+          x1={padding}
+          y1={padding}
+          x2={padding}
+          y2={height - padding}
+          stroke={tokens.axis}
+        />
         {model.points.map((point) => {
           const x = padding + (point.x / maxX) * chartWidth;
           const y = padding + chartHeight - ((point.y - minY) / yRange) * chartHeight;
@@ -356,12 +415,16 @@ function ScatterPreview({
 }
 
 function TablePreview({
-  model
+  model,
+  theme
 }: {
   readonly model: TablePreviewModel;
+  readonly theme: ChartTheme;
 }): ReactElement {
+  const tokens = PREVIEW_THEME_TOKENS[theme];
+
   return (
-    <div className="chart-preview chart-preview-table">
+    <div className={tokens.tableClassName}>
       <div className="result-table-wrap">
         <table className="result-table chart-table-preview">
           <thead>

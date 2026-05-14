@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 import {
   type DatabaseQueryRow,
@@ -7,6 +9,23 @@ import {
 } from "../src/index.js";
 
 describe("database", () => {
+  it("keeps the PostgreSQL test fixture at 80 orders over 20 daily buckets", () => {
+    const fixtureSql = readFileSync(
+      new URL("../prisma/postgres-test-schema.sql", import.meta.url),
+      "utf8"
+    );
+
+    expect(fixtureSql).toContain("generate_series(0, 19)");
+    expect(fixtureSql).toContain("generate_series(1, 4)");
+    expect(fixtureSql).toContain("order_count <> 80");
+    expect(fixtureSql).toContain("having count(*) <> 4");
+    expect(fixtureSql).toContain("Seeded % cda_orders rows across 20 days");
+    expect(fixtureSql).toContain("'Acme Co'");
+    expect(fixtureSql).toContain("'Wayne Wholesale'");
+    expect(fixtureSql).toContain("'review_required'");
+    expect(fixtureSql).toContain("'refunded'");
+  });
+
   it("summarizes database configuration", () => {
     const summary = summarizeDatabaseConfig({
       databaseUrl: "postgresql://postgres:postgres@localhost:5432/clusterdata"

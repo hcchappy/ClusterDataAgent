@@ -5,7 +5,7 @@ Monorepo status:
 - API, web app, and core domain packages are in place
 - agent-core chat, native upstream SSE streaming, and session memory are in place
 - web app now uses the chat streaming endpoint as an interactive ChatBI workbench with markdown chat rendering, SQL validation, query history/CSV export, dataset profiling, and chart recommendation panels with visual previews
-- web app now supports English/Chinese interface switching and includes an in-app documentation page with usage tutorials, API calling examples, and workflow diagrams
+- web app now supports English/Chinese interface switching and includes an in-app documentation page with detailed usage manuals, API calling examples, and an optimized workflow diagram
 - web workbench now includes an Access Check panel for tenant and role authorization decisions
 - agent tools now include metadata search with Chinese/English business term expansion so natural-language questions like `订单中有多少记录` can discover `cda_orders` before running read-only SQL
 - tool-system now supports named tool discovery and batch tool registration for built-in and future extension points, and the API now registers its built-in tools through that discovery flow
@@ -13,8 +13,10 @@ Monorepo status:
 - sql-agent now validates and generates SELECT SQL against the loaded schema catalog
 - analysis-service now profiles JSON datasets with field statistics, data quality warnings, and time series trend/anomaly analysis
 - chart-engine now recommends charts from dataset profiles, including time series, category comparisons, numeric distributions, outlier views, and large-series sampling hints
+- chart-engine now applies polished dark and light ECharts themes across titles, axes, legends, tooltips, zoom controls, and web previews
 - security now blocks common prompt injection attempts in chat requests and emits audit logs for chat, SQL, metadata refresh, and access-check flows
 - security now enforces role-aware SQL read permissions across SQL validation, SQL execution, SQL suggestion, and metadata-aware SQL agent tools
+- Turbo task outputs now match the current no-emit TypeScript packages while caching the web app's `dist` build output without missing-output warnings
 - Husky now installs a `pre-commit` hook that runs `pnpm verify`
 - tests, lint, typecheck, and build all pass
 
@@ -31,7 +33,7 @@ Current priority:
 
 Roadmap status:
 - Phase 1 through Phase 5, Phase 8, and Phase 9 are implemented in the current TypeScript stack.
-- Phase 7 is implemented for chart recommendation and large-dataset optimization; chart theme polish is still open.
+- Phase 7 is implemented for chart recommendation, large-dataset optimization, and dark/light chart theme polish.
 - Phase 6 Python/FastAPI/Pandas remains a later migration target; the current analysis service is TypeScript-based.
 
 Commands:
@@ -47,6 +49,7 @@ Commands:
 Environment:
 - Local development now reads the root `.env` file automatically for the API server.
 - `.env.example` is a template only; copy runtime secrets and overrides into the root `.env`.
+- Prisma CLI commands in `packages/database` use `packages/database/prisma.config.ts`, which reads `DATABASE_URL` for Prisma 7 validation and generation and falls back to the documented local test database URL.
 - `OPENAI_API_KEY` enables `/api/chat` and `/api/chat/stream`
 - `OPENAI_ENDPOINT` sets the compatible API base or full responses endpoint
 - `OPENAI_MODEL` sets the default model for agent requests
@@ -99,7 +102,7 @@ Metadata and SQL:
 - `POST /api/analysis/series` summarizes a numeric series.
 - `POST /api/analysis/time-series` analyzes time series cadence, moving averages, and anomalies from timestamp/value points.
 - `POST /api/analysis/profile` profiles JSON rows, infers field kinds, computes numeric/category/date statistics, and reports missing, mixed, empty, and duplicate quality warnings.
-- `POST /api/charts/suggest` accepts either legacy labels/values input or a dataset profile and returns chart recommendations.
+- `POST /api/charts/suggest` accepts either legacy labels/values input or a dataset profile and returns chart recommendations; pass optional `theme: "dark" | "light"` to style generated chart options.
 - Large legacy chart payloads are automatically sampled for rendering, add zoom controls, and mark progressive rendering hints in the returned chart option metadata.
 - The registered agent tools include `search-metadata`, `validate-sql`, `generate-sql`, `query-sql`, `summarize-series`, `analyze-time-series`, `profile-dataset`, `suggest-chart`, and `recommend-charts`.
 - The agent prompt is bilingual and instructs Chinese/English data questions to use metadata and SQL tools for factual answers instead of guessing; common terms such as `订单`, `客户`, and `事件` are expanded to likely schema terms.
@@ -148,9 +151,15 @@ Chart examples:
 - Profile-aware chart recommendations:
   - `curl -X POST http://127.0.0.1:3001/api/charts/suggest -H "content-type: application/json" -d "{\"profile\":{\"rowCount\":3,\"fieldCount\":3,\"fields\":[{\"name\":\"createdAt\",\"kind\":\"date\",\"count\":3,\"missingCount\":0,\"missingRatio\":0,\"distinctCount\":3,\"examples\":[\"2026-01-01T00:00:00.000Z\"],\"minimum\":\"2026-01-01T00:00:00.000Z\",\"maximum\":\"2026-01-03T00:00:00.000Z\"},{\"name\":\"revenue\",\"kind\":\"number\",\"count\":3,\"missingCount\":0,\"missingRatio\":0,\"distinctCount\":3,\"examples\":[10,20,30],\"minimum\":10,\"maximum\":30,\"average\":20,\"median\":20,\"standardDeviation\":8.16,\"outliers\":[]},{\"name\":\"region\",\"kind\":\"string\",\"count\":3,\"missingCount\":0,\"missingRatio\":0,\"distinctCount\":2,\"examples\":[\"north\",\"south\"],\"topValues\":[{\"value\":\"north\",\"count\":2},{\"value\":\"south\",\"count\":1}]}],\"quality\":{\"emptyFieldCount\":0,\"highMissingFieldCount\":0,\"mixedFieldCount\":0,\"duplicateRowCount\":0,\"warnings\":[]}},\"maxRecommendations\":3}"`
 - Large time-series and category payloads are down-sampled before rendering; pie charts collapse long tails into `Other`, and line/bar options expose optimization metadata under `option.meta`.
+- Chart options include theme-aware backgrounds, palettes, title text, axes, split lines, tooltips, legends, zoom sliders, and optimization metadata under `option.meta.theme`.
 
 Web workbench:
 - Open `http://127.0.0.1:3000`.
+- Keep the API running at `http://127.0.0.1:3001`; the Agent Overview panel loads `/api/overview` and now shows an explicit failure message instead of an endless loading state when that API is unreachable.
+- The web client reads `VITE_API_BASE_URL` first and then `WEB_API_BASE_URL`; set either value to `http://127.0.0.1:3001` for a direct API URL.
+- The web dev server uses a strict `3000` port so it will fail fast instead of drifting onto the API port when `3000` is already occupied.
+- The Vite dev proxy is opt-in. Set `WEB_ENABLE_API_PROXY=true` and optionally `WEB_API_PROXY_TARGET=http://127.0.0.1:3001` only when you intentionally want same-origin `/api` forwarding.
+- Restart the web dev server after changing API base URL or proxy settings.
 - Use the language selector in the header to switch between English and Chinese.
 - Use the Workbench and Docs tabs to switch between the interactive ChatBI workspace and the in-app usage documentation.
 - Use the Conversation panel for streaming agent chat.
@@ -160,17 +169,27 @@ Web workbench:
 - Use SQL Guardrail to validate and execute read-only SQL with the selected role, then inspect the returned rows.
 - Use Access Check to verify tenant isolation and role/action authorization decisions.
 - Use Dataset Profile with JSON rows, then Chart Recommendations to get profile-aware chart suggestions.
+- Use the Chart Theme selector to preview recommendations in polished dark or light styling.
 - Chart recommendations render inline previews from the profiled dataset rows instead of showing recommendation text alone.
 - Inline previews also sample large row sets so the workbench stays responsive when chart inputs grow.
 
 Documentation page:
 - The Docs tab includes a usage tutorial for the workbench flow.
-- The API calling tutorial includes curl examples for health checks, SQL validation, dataset profiling, and streaming chat.
-- The workflow section shows the ChatBI request path and includes Mermaid flowchart source for architecture documentation.
+- The detailed manual covers Conversation, SQL Guardrail, Dataset Profile, Chart Recommendations, and Access Check workflows.
+- The API calling tutorial includes curl examples for health checks, SQL validation, SQL execution, dataset profiling, chart recommendations, access checks, and streaming chat.
+- The workflow section shows an optimized visual ChatBI request map and includes Mermaid flowchart source for architecture documentation.
 
 PostgreSQL test schema:
 - The development scanner was verified against `127.0.0.1:5432/clusterdata` using test tables `cda_customers`, `cda_orders`, and `cda_order_events`.
 - The reusable fixture is `packages/database/prisma/postgres-test-schema.sql`.
+- Prisma CLI configuration lives in `packages/database/prisma.config.ts`; it uses `DATABASE_URL` when set and otherwise falls back to `postgresql://postgres:aa@127.0.0.1:5432/clusterdata`. Run `pnpm db:validate` after changing the Prisma schema or database package config.
+- The fixture resets and reseeds the `cda_*` demo tables with 8 customers, 80 orders, and lifecycle events for created, paid, pending-review, and refunded orders.
+- `cda_orders` is generated as 20 consecutive daily buckets from `2026-04-25` through `2026-05-14`, with exactly 4 orders per day for chart, profiling, and SQL trend demos.
+- Apply the fixture with `psql "postgresql://postgres:aa@127.0.0.1:5432/clusterdata" -f packages/database/prisma/postgres-test-schema.sql`.
+- Quick fixture checks:
+  - `select count(*) from cda_orders;`
+  - `select created_at::date as order_date, count(*) from cda_orders group by order_date order by order_date;`
+  - `select status, channel, count(*) from cda_orders group by status, channel order by status, channel;`
 - The scanner reads `information_schema.columns` plus PostgreSQL foreign key metadata and exposes the result through the same metadata endpoints.
 
 Prompt files:

@@ -334,6 +334,40 @@ describe("api", () => {
     await app.close();
   });
 
+  it("passes chart themes through profile-aware recommendations", async () => {
+    const app = await buildApi();
+    const profile = profileDataset({
+      rows: [
+        { region: "north", revenue: 10 },
+        { region: "south", revenue: 20 }
+      ]
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/charts/suggest",
+      payload: {
+        profile,
+        maxRecommendations: 3,
+        theme: "light"
+      }
+    });
+    const recommendation = response
+      .json()
+      .recommendations.find(
+        (item: { title: string }) => item.title === "revenue by region"
+      );
+
+    expect(response.statusCode).toBe(200);
+    expect(recommendation.option).toMatchObject({
+      backgroundColor: "#ffffff",
+      meta: {
+        theme: "light"
+      }
+    });
+
+    await app.close();
+  });
+
   it("keeps legacy chart suggestions working", async () => {
     const app = await buildApi();
     const response = await app.inject({
@@ -354,6 +388,53 @@ describe("api", () => {
         title: { text: "Revenue" }
       }
     });
+
+    await app.close();
+  });
+
+  it("passes chart themes through legacy chart suggestions", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/charts/suggest",
+      payload: {
+        title: "Revenue",
+        labels: ["Jan", "Feb"],
+        values: [10, 20],
+        hasTimeAxis: false,
+        theme: "light"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      option: {
+        backgroundColor: "#ffffff",
+        meta: {
+          theme: "light"
+        }
+      }
+    });
+
+    await app.close();
+  });
+
+  it("rejects invalid chart themes", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/charts/suggest",
+      payload: {
+        title: "Revenue",
+        labels: ["Jan"],
+        values: [10],
+        hasTimeAxis: false,
+        theme: "solarized"
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe("INVALID_CHART_THEME");
 
     await app.close();
   });

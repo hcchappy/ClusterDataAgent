@@ -19,10 +19,13 @@ const DEFAULT_CHART_THEME: ChartTheme = "dark";
 
 interface ChartThemeDefinition {
   readonly backgroundColor: string;
+  readonly panelColor: string;
   readonly textColor: string;
   readonly secondaryTextColor: string;
   readonly axisColor: string;
   readonly splitLineColor: string;
+  readonly zoomBackgroundColor: string;
+  readonly zoomFillerColor: string;
   readonly tooltipBackgroundColor: string;
   readonly tooltipBorderColor: string;
   readonly palette: readonly string[];
@@ -31,20 +34,26 @@ interface ChartThemeDefinition {
 const CHART_THEME_DEFINITIONS: Record<ChartTheme, ChartThemeDefinition> = {
   dark: {
     backgroundColor: "#0d1219",
+    panelColor: "#111824",
     textColor: "#e7ecf3",
     secondaryTextColor: "#9eb1cb",
     axisColor: "#32415b",
     splitLineColor: "#243044",
+    zoomBackgroundColor: "#10151d",
+    zoomFillerColor: "rgba(135, 163, 255, 0.24)",
     tooltipBackgroundColor: "#10151d",
     tooltipBorderColor: "#32415b",
     palette: ["#87a3ff", "#49cc93", "#ffb86c", "#ff7d9c", "#7de1d8", "#c1a6ff", "#f8d66d"]
   },
   light: {
     backgroundColor: "#ffffff",
+    panelColor: "#f8fafc",
     textColor: "#1f2937",
     secondaryTextColor: "#4b5563",
     axisColor: "#cbd5e1",
     splitLineColor: "#e2e8f0",
+    zoomBackgroundColor: "#f8fafc",
+    zoomFillerColor: "rgba(37, 99, 235, 0.18)",
     tooltipBackgroundColor: "#f8fafc",
     tooltipBorderColor: "#cbd5e1",
     palette: ["#2563eb", "#059669", "#ea580c", "#db2777", "#0891b2", "#7c3aed", "#ca8a04"]
@@ -90,36 +99,62 @@ export interface ChartOptimizationMetadata {
   readonly interactiveZoom: boolean;
   readonly progressive: boolean;
   readonly largeMode: boolean;
+  readonly theme: ChartTheme;
 }
 
 interface EChartsAxis {
   readonly type: string;
   readonly data?: readonly string[];
-  readonly axisLabel?: { readonly color: string };
+  readonly axisLabel?: { readonly color: string; readonly hideOverlap?: boolean };
   readonly axisLine?: { readonly lineStyle: { readonly color: string } };
+  readonly axisTick?: { readonly lineStyle: { readonly color: string } };
   readonly splitLine?: { readonly lineStyle: { readonly color: string } };
+}
+
+interface EChartsDataZoom {
+  readonly type: "inside" | "slider";
+  readonly start: number;
+  readonly end: number;
+  readonly backgroundColor?: string;
+  readonly fillerColor?: string;
+  readonly borderColor?: string;
+  readonly textStyle?: { readonly color: string };
+  readonly handleStyle?: { readonly color: string; readonly borderColor: string };
 }
 
 export interface EChartsOption {
   readonly backgroundColor?: string;
   readonly color?: readonly string[];
   readonly textStyle?: { readonly color: string };
-  readonly title: { readonly text: string; readonly textStyle?: { readonly color: string } };
+  readonly title: {
+    readonly text: string;
+    readonly left?: string;
+    readonly top?: number;
+    readonly textStyle?: { readonly color: string; readonly fontWeight?: number };
+  };
+  readonly grid?: {
+    readonly top: number;
+    readonly right: number;
+    readonly bottom: number;
+    readonly left: number;
+    readonly containLabel: boolean;
+  };
   readonly tooltip: {
     readonly trigger: string;
     readonly backgroundColor?: string;
     readonly borderColor?: string;
+    readonly borderWidth?: number;
+    readonly padding?: readonly [number, number];
+    readonly extraCssText?: string;
     readonly textStyle?: { readonly color: string };
   };
   readonly legend?: {
     readonly data: readonly string[];
+    readonly bottom?: number;
+    readonly itemGap?: number;
     readonly textStyle?: { readonly color: string };
   };
-  dataZoom?: readonly {
-    readonly type: "inside" | "slider";
-    readonly start: number;
-    readonly end: number;
-  }[];
+  dataZoom?: readonly EChartsDataZoom[];
   animation?: boolean;
   meta?: ChartOptimizationMetadata;
   xAxis?: EChartsAxis;
@@ -127,6 +162,10 @@ export interface EChartsOption {
   readonly series: readonly {
     readonly type: ChartKind;
     readonly name: string;
+    readonly itemStyle?: {
+      readonly borderColor?: string;
+      readonly borderWidth?: number;
+    };
     readonly sampling?: "lttb" | "average";
     readonly large?: boolean;
     readonly largeThreshold?: number;
@@ -177,7 +216,8 @@ export function buildEChartsOption(
       strategy: optimizedPoints.length < points.length ? "top-n-plus-other" : "none",
       interactiveZoom: false,
       progressive: false,
-      largeMode: false
+      largeMode: false,
+      theme: config.theme
     });
     const option: EChartsOption = {
       ...buildThemeSurface(title, "item", theme),
@@ -191,10 +231,11 @@ export function buildEChartsOption(
         {
           type: kind,
           name: title,
-          data: optimizedPoints.map((point) => ({
+        data: optimizedPoints.map((point) => ({
             name: point.label,
             value: point.value
-          }))
+          })),
+          itemStyle: { borderColor: theme.backgroundColor, borderWidth: 1 }
         }
       ]
     };
@@ -211,7 +252,8 @@ export function buildEChartsOption(
     strategy: optimizedPoints.length < points.length ? "stride" : "none",
     interactiveZoom: points.length >= config.zoomThreshold,
     progressive: points.length >= config.progressiveThreshold,
-    largeMode: kind === "scatter" && points.length >= config.largeSeriesThreshold
+    largeMode: kind === "scatter" && points.length >= config.largeSeriesThreshold,
+    theme: config.theme
   });
   const option: EChartsOption = {
     ...buildThemeSurface(title, "axis", theme),
@@ -235,10 +277,7 @@ export function buildEChartsOption(
   option.yAxis = buildAxisTheme("value", theme);
 
   if (meta.interactiveZoom) {
-    option.dataZoom = [
-      { type: "inside", start: 0, end: 100 },
-      { type: "slider", start: 0, end: 100 }
-    ];
+    option.dataZoom = buildDataZoomTheme(theme);
   }
 
   logChartOptimization(kind, title, meta);
@@ -398,11 +437,12 @@ function buildHistogramOption(
     meta: buildOptimizationMetadata({
       originalPointCount: metric.count,
       renderedPointCount: bucketCount,
-      strategy: "binned",
-      interactiveZoom: false,
-      progressive: false,
-      largeMode: false
-    })
+    strategy: "binned",
+    interactiveZoom: false,
+    progressive: false,
+    largeMode: false,
+    theme: resolveChartBuildOptions(options).theme
+  })
   };
 }
 
@@ -419,7 +459,8 @@ function buildOutlierScatterOption(
     strategy: "none",
     interactiveZoom: pointCount >= config.zoomThreshold,
     progressive: pointCount >= config.progressiveThreshold,
-    largeMode: pointCount >= config.largeSeriesThreshold
+    largeMode: pointCount >= config.largeSeriesThreshold,
+    theme: config.theme
   });
 
   return {
@@ -427,10 +468,7 @@ function buildOutlierScatterOption(
     animation: !meta.progressive,
     meta,
     dataZoom: meta.interactiveZoom
-      ? [
-          { type: "inside", start: 0, end: 100 },
-          { type: "slider", start: 0, end: 100 }
-        ]
+      ? buildDataZoomTheme(theme)
       : undefined,
     xAxis: buildAxisTheme("value", theme),
     yAxis: buildAxisTheme("value", theme),
@@ -473,19 +511,31 @@ function buildThemeSurface(
   title: string,
   trigger: string,
   theme: ChartThemeDefinition
-): Pick<EChartsOption, "backgroundColor" | "color" | "textStyle" | "title" | "tooltip"> {
+): Pick<EChartsOption, "backgroundColor" | "color" | "textStyle" | "title" | "grid" | "tooltip"> {
   return {
     backgroundColor: theme.backgroundColor,
     color: theme.palette,
     textStyle: { color: theme.secondaryTextColor },
     title: {
       text: title,
-      textStyle: { color: theme.textColor }
+      left: "center",
+      top: 8,
+      textStyle: { color: theme.textColor, fontWeight: 600 }
+    },
+    grid: {
+      top: 48,
+      right: 20,
+      bottom: 36,
+      left: 24,
+      containLabel: true
     },
     tooltip: {
       trigger,
       backgroundColor: theme.tooltipBackgroundColor,
       borderColor: theme.tooltipBorderColor,
+      borderWidth: 1,
+      padding: [10, 12],
+      extraCssText: "box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24); border-radius: 6px;",
       textStyle: { color: theme.textColor }
     }
   };
@@ -499,8 +549,11 @@ function buildAxisTheme(
   return {
     type,
     data,
-    axisLabel: { color: theme.secondaryTextColor },
+    axisLabel: { color: theme.secondaryTextColor, hideOverlap: true },
     axisLine: {
+      lineStyle: { color: theme.axisColor }
+    },
+    axisTick: {
       lineStyle: { color: theme.axisColor }
     },
     splitLine:
@@ -510,6 +563,24 @@ function buildAxisTheme(
           }
         : undefined
   };
+}
+
+function buildDataZoomTheme(theme: ChartThemeDefinition): readonly EChartsDataZoom[] {
+  const sliderTheme = {
+    backgroundColor: theme.zoomBackgroundColor,
+    fillerColor: theme.zoomFillerColor,
+    borderColor: theme.axisColor,
+    textStyle: { color: theme.secondaryTextColor },
+    handleStyle: {
+      color: theme.panelColor,
+      borderColor: theme.axisColor
+    }
+  };
+
+  return [
+    { type: "inside", start: 0, end: 100 },
+    { type: "slider", start: 0, end: 100, ...sliderTheme }
+  ];
 }
 
 function optimizeCategoryPoints(
@@ -559,6 +630,7 @@ function buildOptimizationMetadata(input: {
   readonly interactiveZoom: boolean;
   readonly progressive: boolean;
   readonly largeMode: boolean;
+  readonly theme: ChartTheme;
 }): ChartOptimizationMetadata {
   return {
     originalPointCount: input.originalPointCount,
@@ -567,7 +639,8 @@ function buildOptimizationMetadata(input: {
     strategy: input.strategy,
     interactiveZoom: input.interactiveZoom,
     progressive: input.progressive,
-    largeMode: input.largeMode
+    largeMode: input.largeMode,
+    theme: input.theme
   };
 }
 
