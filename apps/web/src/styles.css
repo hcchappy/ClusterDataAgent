@@ -500,6 +500,7 @@ h2 {
   text-transform: uppercase;
 }
 
+.tool-form select,
 .security-grid input,
 .security-grid select {
   width: 100%;

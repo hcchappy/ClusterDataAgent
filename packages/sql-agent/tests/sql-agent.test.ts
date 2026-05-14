@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildMetadataAwareSelectQuery,
   buildSafeLimitClause,
+  collectSqlReadTargets,
   validateSqlStatement
 } from "../src/index.js";
 
@@ -76,6 +77,21 @@ describe("sql-agent", () => {
       "o.amount",
       "o.customer_id",
       "c.id"
+    ]);
+  });
+
+  it("collects resolved SQL read targets for permission checks", () => {
+    const result = collectSqlReadTargets(
+      "select o.id, c.name from cda_orders o join cda_customers c on o.customer_id = c.id limit 20",
+      postgresMetadataContext
+    );
+
+    expect(result.referencedTables).toEqual(["cda_orders", "cda_customers"]);
+    expect(result.resolvedColumns).toEqual([
+      "cda_orders.id",
+      "cda_customers.name",
+      "cda_orders.customer_id",
+      "cda_customers.id"
     ]);
   });
 

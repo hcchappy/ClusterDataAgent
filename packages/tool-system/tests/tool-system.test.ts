@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLogger } from "@clusterdata/shared";
-import { ToolRegistry, type ToolExecutionHooks } from "../src/index.js";
+import {
+  ToolRegistry,
+  discoverTools,
+  type ToolExecutionHooks
+} from "../src/index.js";
 
 describe("tool-system", () => {
   it("registers and executes tools", async () => {
@@ -164,5 +168,59 @@ describe("tool-system", () => {
         willRetry: true
       })
     );
+  });
+
+  it("discovers named tools and registers them in one pass", async () => {
+    const registry = new ToolRegistry();
+
+    const discovered = registry.registerDiscovered(
+      {
+        echo: {
+          name: "echo",
+          description: "echoes a string",
+          inputSchema: {
+            type: "object",
+            properties: {
+              value: { type: "string" }
+            },
+            required: ["value"],
+            additionalProperties: false
+          },
+          execute: ({ value }: { value: string }) => value
+        },
+        upper: {
+          name: "upper",
+          description: "uppercases a string",
+          inputSchema: {
+            type: "object",
+            properties: {
+              value: { type: "string" }
+            },
+            required: ["value"],
+            additionalProperties: false
+          },
+          execute: ({ value }: { value: string }) => value.toUpperCase()
+        }
+      },
+      {
+        sourceName: "test-builtins"
+      }
+    );
+
+    expect(discovered.map((tool) => tool.name)).toEqual(["echo", "upper"]);
+    await expect(registry.execute("upper", { value: "ok" })).resolves.toBe("OK");
+    expect(registry.list()).toHaveLength(2);
+  });
+
+  it("rejects discovered record entries whose key and tool name disagree", () => {
+    expect(() =>
+      discoverTools({
+        echo: {
+          name: "other",
+          description: "mismatch",
+          execute: () => "nope"
+        }
+      })
+    ).toThrowError(/does not match tool name/);
   });
 });

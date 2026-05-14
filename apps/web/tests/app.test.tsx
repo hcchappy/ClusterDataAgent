@@ -88,6 +88,7 @@ describe("web app", () => {
         onSend={() => {}}
         onPromptSelect={() => {}}
         sqlValue="select id from Tenant limit 20"
+        sqlRole="viewer"
         sqlResult={{
           allowed: true,
           normalizedSql: "select id from Tenant limit 20",
@@ -131,6 +132,7 @@ describe("web app", () => {
         ]}
         isRunningSql={false}
         onSqlChange={() => {}}
+        onSqlRoleChange={() => {}}
         onValidateSql={() => {}}
         onRunSql={() => {}}
         onReuseSqlHistory={() => {}}
@@ -217,6 +219,7 @@ describe("web app", () => {
     expect(html).toContain("Conversation");
     expect(html).toContain("Tool Activity");
     expect(html).toContain("SQL Guardrail");
+    expect(html).toContain('id="sql-role-select"');
     expect(html).toContain("Run Query");
     expect(html).toContain("Export CSV");
     expect(html).toContain("Recent Queries");
@@ -258,12 +261,14 @@ describe("web app", () => {
         onSend={() => {}}
         onPromptSelect={() => {}}
         sqlValue="select id from Tenant limit 20"
+        sqlRole="analyst"
         sqlResult={null}
         isValidatingSql={false}
         sqlQueryResult={null}
         sqlHistory={[]}
         isRunningSql={false}
         onSqlChange={() => {}}
+        onSqlRoleChange={() => {}}
         onValidateSql={() => {}}
         onRunSql={() => {}}
         onReuseSqlHistory={() => {}}
@@ -319,12 +324,14 @@ describe("web app", () => {
         onSend={() => {}}
         onPromptSelect={() => {}}
         sqlValue=""
+        sqlRole="analyst"
         sqlResult={null}
         isValidatingSql={false}
         sqlQueryResult={null}
         sqlHistory={[]}
         isRunningSql={false}
         onSqlChange={() => {}}
+        onSqlRoleChange={() => {}}
         onValidateSql={() => {}}
         onRunSql={() => {}}
         onReuseSqlHistory={() => {}}

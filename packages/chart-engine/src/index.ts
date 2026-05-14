@@ -7,6 +7,7 @@ import { AppError, createLogger } from "@clusterdata/shared";
 
 export type ChartKind = "line" | "bar" | "pie" | "table" | "histogram" | "scatter";
 export type ChartSamplingStrategy = "none" | "stride" | "top-n-plus-other" | "binned";
+export type ChartTheme = "dark" | "light";
 
 const logger = createLogger("chart-engine");
 const DEFAULT_MAX_RENDER_POINTS = 120;
@@ -14,6 +15,41 @@ const DEFAULT_MAX_PIE_SLICES = 8;
 const DEFAULT_ZOOM_THRESHOLD = 24;
 const DEFAULT_PROGRESSIVE_THRESHOLD = 200;
 const DEFAULT_LARGE_SERIES_THRESHOLD = 400;
+const DEFAULT_CHART_THEME: ChartTheme = "dark";
+
+interface ChartThemeDefinition {
+  readonly backgroundColor: string;
+  readonly textColor: string;
+  readonly secondaryTextColor: string;
+  readonly axisColor: string;
+  readonly splitLineColor: string;
+  readonly tooltipBackgroundColor: string;
+  readonly tooltipBorderColor: string;
+  readonly palette: readonly string[];
+}
+
+const CHART_THEME_DEFINITIONS: Record<ChartTheme, ChartThemeDefinition> = {
+  dark: {
+    backgroundColor: "#0d1219",
+    textColor: "#e7ecf3",
+    secondaryTextColor: "#9eb1cb",
+    axisColor: "#32415b",
+    splitLineColor: "#243044",
+    tooltipBackgroundColor: "#10151d",
+    tooltipBorderColor: "#32415b",
+    palette: ["#87a3ff", "#49cc93", "#ffb86c", "#ff7d9c", "#7de1d8", "#c1a6ff", "#f8d66d"]
+  },
+  light: {
+    backgroundColor: "#ffffff",
+    textColor: "#1f2937",
+    secondaryTextColor: "#4b5563",
+    axisColor: "#cbd5e1",
+    splitLineColor: "#e2e8f0",
+    tooltipBackgroundColor: "#f8fafc",
+    tooltipBorderColor: "#cbd5e1",
+    palette: ["#2563eb", "#059669", "#ea580c", "#db2777", "#0891b2", "#7c3aed", "#ca8a04"]
+  }
+};
 
 export interface ChartSuggestionInput {
   readonly dimensions: readonly string[];
@@ -24,6 +60,7 @@ export interface ChartSuggestionInput {
 export interface ChartRecommendationRequest {
   readonly profile: DatasetProfile;
   readonly maxRecommendations?: number;
+  readonly theme?: ChartTheme;
 }
 
 export interface ChartRecommendation {
@@ -42,6 +79,7 @@ export interface ChartBuildOptions {
   readonly zoomThreshold?: number;
   readonly progressiveThreshold?: number;
   readonly largeSeriesThreshold?: number;
+  readonly theme?: ChartTheme;
 }
 
 export interface ChartOptimizationMetadata {
@@ -54,10 +92,29 @@ export interface ChartOptimizationMetadata {
   readonly largeMode: boolean;
 }
 
+interface EChartsAxis {
+  readonly type: string;
+  readonly data?: readonly string[];
+  readonly axisLabel?: { readonly color: string };
+  readonly axisLine?: { readonly lineStyle: { readonly color: string } };
+  readonly splitLine?: { readonly lineStyle: { readonly color: string } };
+}
+
 export interface EChartsOption {
-  readonly title: { readonly text: string };
-  readonly tooltip: { readonly trigger: string };
-  readonly legend?: { readonly data: readonly string[] };
+  readonly backgroundColor?: string;
+  readonly color?: readonly string[];
+  readonly textStyle?: { readonly color: string };
+  readonly title: { readonly text: string; readonly textStyle?: { readonly color: string } };
+  readonly tooltip: {
+    readonly trigger: string;
+    readonly backgroundColor?: string;
+    readonly borderColor?: string;
+    readonly textStyle?: { readonly color: string };
+  };
+  readonly legend?: {
+    readonly data: readonly string[];
+    readonly textStyle?: { readonly color: string };
+  };
   dataZoom?: readonly {
     readonly type: "inside" | "slider";
     readonly start: number;
@@ -65,8 +122,8 @@ export interface EChartsOption {
   }[];
   animation?: boolean;
   meta?: ChartOptimizationMetadata;
-  xAxis?: { readonly type: string; readonly data?: readonly string[] };
-  yAxis?: { readonly type: string };
+  xAxis?: EChartsAxis;
+  yAxis?: EChartsAxis;
   readonly series: readonly {
     readonly type: ChartKind;
     readonly name: string;
@@ -106,6 +163,7 @@ export function buildEChartsOption(
   options: ChartBuildOptions = {}
 ): EChartsOption {
   const config = resolveChartBuildOptions(options);
+  const theme = CHART_THEME_DEFINITIONS[config.theme];
   const points = labels.map((label, index) => ({
     label,
     value: values[index] ?? 0
@@ -122,9 +180,11 @@ export function buildEChartsOption(
       largeMode: false
     });
     const option: EChartsOption = {
-      title: { text: title },
-      tooltip: { trigger: "item" },
-      legend: { data: optimizedPoints.map((point) => point.label) },
+      ...buildThemeSurface(title, "item", theme),
+      legend: {
+        data: optimizedPoints.map((point) => point.label),
+        textStyle: { color: theme.secondaryTextColor }
+      },
       animation: !meta.progressive,
       meta,
       series: [
@@ -154,8 +214,7 @@ export function buildEChartsOption(
     largeMode: kind === "scatter" && points.length >= config.largeSeriesThreshold
   });
   const option: EChartsOption = {
-    title: { text: title },
-    tooltip: { trigger: "axis" },
+    ...buildThemeSurface(title, "axis", theme),
     animation: !meta.progressive,
     meta,
     series: [
@@ -172,11 +231,8 @@ export function buildEChartsOption(
     ]
   };
 
-  option.xAxis = {
-    type: "category",
-    data: optimizedPoints.map((point) => point.label)
-  };
-  option.yAxis = { type: "value" };
+  option.xAxis = buildAxisTheme("category", theme, optimizedPoints.map((point) => point.label));
+  option.yAxis = buildAxisTheme("value", theme);
 
   if (meta.interactiveZoom) {
     option.dataZoom = [
@@ -240,7 +296,10 @@ export function recommendChartsFromProfile(
                 `${metric.name} by ${categoryField.name}`,
                 categoryField.topValues.map((value) => value.value),
                 categoryField.topValues.map((value) => value.count),
-                categoryField.distinctCount <= 8 ? "bar" : "table"
+                categoryField.distinctCount <= 8 ? "bar" : "table",
+                {
+                  theme: request.theme
+                }
               )
             : undefined
       });
@@ -255,7 +314,9 @@ export function recommendChartsFromProfile(
       metrics: [metric.name],
       score: metric.distinctCount > 1 ? 0.78 : 0.35,
       reason: "Numeric fields can be inspected for spread, skew, and outliers",
-      option: buildHistogramOption(metric)
+      option: buildHistogramOption(metric, {
+        theme: request.theme
+      })
     });
 
     if (metric.outliers.length > 0) {
@@ -266,7 +327,9 @@ export function recommendChartsFromProfile(
         metrics: [metric.name],
         score: 0.74,
         reason: "Detected outliers are easier to review on an indexed scatter plot",
-        option: buildOutlierScatterOption(metric)
+        option: buildOutlierScatterOption(metric, {
+          theme: request.theme
+        })
       });
     }
   }
@@ -289,13 +352,17 @@ export function recommendChartsFromProfile(
   logger.info("chart recommendations generated", {
     rowCount: request.profile.rowCount,
     fieldCount: request.profile.fieldCount,
-    recommendationCount: topRecommendations.length
+    recommendationCount: topRecommendations.length,
+    theme: request.theme ?? DEFAULT_CHART_THEME
   });
 
   return topRecommendations;
 }
 
-function buildHistogramOption(metric: NumberFieldProfile): EChartsOption {
+function buildHistogramOption(
+  metric: NumberFieldProfile,
+  options: ChartBuildOptions = {}
+): EChartsOption {
   const bucketCount = Math.min(8, Math.max(1, metric.distinctCount));
   const range = metric.maximum - metric.minimum;
   const bucketSize = range === 0 ? 1 : range / bucketCount;
@@ -318,7 +385,13 @@ function buildHistogramOption(metric: NumberFieldProfile): EChartsOption {
     values[bucketIndex] += 1;
   }
 
-  const option = buildEChartsOption(`${metric.name} distribution`, labels, values, "histogram");
+  const option = buildEChartsOption(
+    `${metric.name} distribution`,
+    labels,
+    values,
+    "histogram",
+    options
+  );
 
   return {
     ...option,
@@ -333,19 +406,24 @@ function buildHistogramOption(metric: NumberFieldProfile): EChartsOption {
   };
 }
 
-function buildOutlierScatterOption(metric: NumberFieldProfile): EChartsOption {
+function buildOutlierScatterOption(
+  metric: NumberFieldProfile,
+  options: ChartBuildOptions = {}
+): EChartsOption {
+  const config = resolveChartBuildOptions(options);
+  const theme = CHART_THEME_DEFINITIONS[config.theme];
   const pointCount = metric.outliers.length;
   const meta = buildOptimizationMetadata({
     originalPointCount: pointCount,
     renderedPointCount: pointCount,
     strategy: "none",
-    interactiveZoom: pointCount >= DEFAULT_ZOOM_THRESHOLD,
-    progressive: pointCount >= DEFAULT_PROGRESSIVE_THRESHOLD,
-    largeMode: pointCount >= DEFAULT_LARGE_SERIES_THRESHOLD
+    interactiveZoom: pointCount >= config.zoomThreshold,
+    progressive: pointCount >= config.progressiveThreshold,
+    largeMode: pointCount >= config.largeSeriesThreshold
   });
+
   return {
-    title: { text: `${metric.name} outliers` },
-    tooltip: { trigger: "item" },
+    ...buildThemeSurface(`${metric.name} outliers`, "item", theme),
     animation: !meta.progressive,
     meta,
     dataZoom: meta.interactiveZoom
@@ -354,16 +432,16 @@ function buildOutlierScatterOption(metric: NumberFieldProfile): EChartsOption {
           { type: "slider", start: 0, end: 100 }
         ]
       : undefined,
-    xAxis: { type: "value" },
-    yAxis: { type: "value" },
+    xAxis: buildAxisTheme("value", theme),
+    yAxis: buildAxisTheme("value", theme),
     series: [
       {
         type: "scatter",
         name: metric.name,
         large: meta.largeMode || undefined,
-        largeThreshold: meta.largeMode ? DEFAULT_LARGE_SERIES_THRESHOLD : undefined,
+        largeThreshold: meta.largeMode ? config.largeSeriesThreshold : undefined,
         progressive: meta.progressive ? 500 : undefined,
-        progressiveThreshold: meta.progressive ? DEFAULT_PROGRESSIVE_THRESHOLD : undefined,
+        progressiveThreshold: meta.progressive ? config.progressiveThreshold : undefined,
         data: metric.outliers.map(
           (outlier): [number, number] => [outlier.index, outlier.value]
         )
@@ -386,7 +464,51 @@ function resolveChartBuildOptions(options: ChartBuildOptions): Required<ChartBui
     maxPieSlices: options.maxPieSlices ?? DEFAULT_MAX_PIE_SLICES,
     zoomThreshold: options.zoomThreshold ?? DEFAULT_ZOOM_THRESHOLD,
     progressiveThreshold: options.progressiveThreshold ?? DEFAULT_PROGRESSIVE_THRESHOLD,
-    largeSeriesThreshold: options.largeSeriesThreshold ?? DEFAULT_LARGE_SERIES_THRESHOLD
+    largeSeriesThreshold: options.largeSeriesThreshold ?? DEFAULT_LARGE_SERIES_THRESHOLD,
+    theme: options.theme ?? DEFAULT_CHART_THEME
+  };
+}
+
+function buildThemeSurface(
+  title: string,
+  trigger: string,
+  theme: ChartThemeDefinition
+): Pick<EChartsOption, "backgroundColor" | "color" | "textStyle" | "title" | "tooltip"> {
+  return {
+    backgroundColor: theme.backgroundColor,
+    color: theme.palette,
+    textStyle: { color: theme.secondaryTextColor },
+    title: {
+      text: title,
+      textStyle: { color: theme.textColor }
+    },
+    tooltip: {
+      trigger,
+      backgroundColor: theme.tooltipBackgroundColor,
+      borderColor: theme.tooltipBorderColor,
+      textStyle: { color: theme.textColor }
+    }
+  };
+}
+
+function buildAxisTheme(
+  type: "category" | "value",
+  theme: ChartThemeDefinition,
+  data?: readonly string[]
+): EChartsAxis {
+  return {
+    type,
+    data,
+    axisLabel: { color: theme.secondaryTextColor },
+    axisLine: {
+      lineStyle: { color: theme.axisColor }
+    },
+    splitLine:
+      type === "value"
+        ? {
+            lineStyle: { color: theme.splitLineColor }
+          }
+        : undefined
   };
 }
 

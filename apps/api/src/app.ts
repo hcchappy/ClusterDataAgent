@@ -40,20 +40,32 @@ import {
   assertChatRequestSecurity,
   assertDatasetProfileRequestSecurity,
   assertMetadataSearchRequestSecurity,
+  assertSqlReadAccess,
+  assertSqlRoleRequestInput,
   assertSeriesRequestSecurity,
   assertSqlRequestSecurity,
   assertSqlSuggestionRequestSecurity,
   assertTimeSeriesRequestSecurity,
   authorizeAccess,
-  buildRequestSecurityPolicy
+  authorizeSqlReadAccess,
+  buildRequestSecurityPolicy,
+  writeSecurityAuditEvent,
+  type SecurityAuditStatus,
+  type SqlReadAccessPolicy,
+  type UserRole
 } from "@clusterdata/security";
 import { createLogger, safeErrorMessage, AppError } from "@clusterdata/shared";
 import {
   buildMetadataAwareSelectQuery as buildSqlAwareSelectQuery,
   buildSafeLimitClause,
+  collectSqlReadTargets,
   validateSqlStatement
 } from "@clusterdata/sql-agent";
-import { ToolRegistry, type ToolRegistryOptions } from "@clusterdata/tool-system";
+import {
+  ToolRegistry,
+  type ToolDefinition,
+  type ToolRegistryOptions
+} from "@clusterdata/tool-system";
 import { loadApiConfig, type ApiConfig } from "./config.js";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -95,7 +107,11 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     ));
   const queryExecutor = options.queryExecutor ?? createQueryExecutor(config, logger);
   const toolRegistry =
-    options.toolRegistry ?? buildToolRegistry(() => metadataCatalog, queryExecutor);
+    options.toolRegistry ??
+    buildToolRegistry(() => metadataCatalog, queryExecutor, {}, {
+      sqlAccessPolicy: config.sqlAccess,
+      sqlRole: config.sqlAccess.defaultRole
+    });
   const sessionStore = options.sessionStore ?? createSessionStore(config, logger);
   const agentExecutor =
     options.agentExecutor ??
@@ -199,6 +215,10 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
         streaming: true
       },
       requestSecurity: requestSecurityPolicy,
+      sqlAccess: {
+        defaultRole: config.sqlAccess.defaultRole,
+        roles: config.sqlAccess.roles
+      },
       security: authorizeAccess({
         role: "analyst",
         tenantId: "tenant-a",
@@ -322,63 +342,109 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     };
   });
 
-  app.post("/api/metadata/refresh", async () => {
-    metadataCatalog = await refreshConfiguredMetadataCatalog(
-      config,
-      metadataService,
-      logger,
-      options.metadataCatalogLoader
-    );
+  app.post("/api/metadata/refresh", async (request) =>
+    await runAuditedRequest(
+      request,
+      "metadata.refresh",
+      undefined,
+      async () => {
+        metadataCatalog = await refreshConfiguredMetadataCatalog(
+          config,
+          metadataService,
+          logger,
+          options.metadataCatalogLoader
+        );
 
-    app.log.info(
-      {
-        sourcePath: metadataCatalog.sourcePath,
-        tableCount: metadataCatalog.summary.tableCount,
-        relationCount: metadataCatalog.summary.relationCount,
-        loadedAt: metadataCatalog.loadedAt
+        app.log.info(
+          {
+            sourcePath: metadataCatalog.sourcePath,
+            tableCount: metadataCatalog.summary.tableCount,
+            relationCount: metadataCatalog.summary.relationCount,
+            loadedAt: metadataCatalog.loadedAt
+          },
+          "metadata catalog refreshed"
+        );
+
+        return {
+          ok: true,
+          sourcePath: metadataCatalog.sourcePath,
+          loadedAt: metadataCatalog.loadedAt,
+          summary: metadataCatalog.summary,
+          relations: metadataCatalog.relations
+        };
       },
-      "metadata catalog refreshed"
-    );
-
-    return {
-      ok: true,
-      sourcePath: metadataCatalog.sourcePath,
-      loadedAt: metadataCatalog.loadedAt,
-      summary: metadataCatalog.summary,
-      relations: metadataCatalog.relations
-    };
-  });
+      (result) => ({
+        tableCount: result.summary.tableCount,
+        relationCount: result.summary.relationCount,
+        loadedAt: result.loadedAt
+      })
+    )
+  );
 
   app.post("/api/chat", async (request) => {
     const body = request.body as AgentTurnRequest | undefined;
     const executor = getAgentExecutor(agentExecutor);
 
-    if (typeof body?.sessionId !== "string" || typeof body.message !== "string") {
-      throw new AppError("sessionId and message are required", "INVALID_CHAT_REQUEST", 400);
-    }
+    return await runAuditedRequest(
+      request,
+      "chat.request",
+      {
+        sessionId: typeof body?.sessionId === "string" ? body.sessionId : undefined,
+        model: typeof body?.model === "string" ? body.model : config.openAiModel,
+        messageChars: typeof body?.message === "string" ? body.message.length : undefined
+      },
+      async () => {
+        if (typeof body?.sessionId !== "string" || typeof body.message !== "string") {
+          throw new AppError("sessionId and message are required", "INVALID_CHAT_REQUEST", 400);
+        }
 
-    assertChatRequestSecurity(body, requestSecurityPolicy);
+        assertChatRequestSecurity(body, requestSecurityPolicy);
 
-    const result = await executor.executeTurn(body);
+        const result = await executor.executeTurn(body);
 
-    return {
-      ok: true,
-      sessionId: result.sessionId,
-      outputText: result.outputText,
-      toolCalls: result.toolCalls,
-      usage: result.usage
-    };
+        return {
+          ok: true,
+          sessionId: result.sessionId,
+          outputText: result.outputText,
+          toolCalls: result.toolCalls,
+          usage: result.usage
+        };
+      },
+      (result) => ({
+        outputChars: result.outputText.length,
+        toolCallCount: result.toolCalls.length
+      })
+    );
   });
 
   app.post("/api/chat/stream", async (request, reply) => {
     const body = request.body as AgentTurnRequest | undefined;
     const executor = getAgentExecutor(agentExecutor);
+    const auditDetails = {
+      sessionId: typeof body?.sessionId === "string" ? body.sessionId : undefined,
+      model: typeof body?.model === "string" ? body.model : config.openAiModel,
+      messageChars: typeof body?.message === "string" ? body.message.length : undefined
+    };
 
     if (typeof body?.sessionId !== "string" || typeof body.message !== "string") {
+      writeRequestAuditEvent(request, "chat.stream", "blocked", {
+        ...auditDetails,
+        code: "INVALID_CHAT_REQUEST",
+        reason: "sessionId and message are required"
+      });
       throw new AppError("sessionId and message are required", "INVALID_CHAT_REQUEST", 400);
     }
 
-    assertChatRequestSecurity(body, requestSecurityPolicy);
+    try {
+      assertChatRequestSecurity(body, requestSecurityPolicy);
+    } catch (error) {
+      writeRequestAuditEvent(request, "chat.stream", getSecurityAuditStatus(error), {
+        ...auditDetails,
+        code: error instanceof AppError ? error.code : undefined,
+        reason: safeErrorMessage(error)
+      });
+      throw error;
+    }
 
     applySseCorsHeaders(request, reply);
     reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -387,15 +453,47 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     reply.hijack();
     reply.raw.flushHeaders?.();
     let emittedFailureEvent = false;
+    let outputChars = 0;
+    let toolCallCount = 0;
+    let failureCode: string | undefined;
+    let failureReason: string | undefined;
 
     try {
       for await (const event of executor.streamTurn(body)) {
         if (event.type === "response.failed") {
           emittedFailureEvent = true;
+          failureCode = "code" in event && typeof event.code === "string" ? event.code : undefined;
+          failureReason =
+            "error" in event && typeof event.error === "string" ? event.error : undefined;
+        }
+
+        if (
+          event.type === "response.output_text.delta" &&
+          "delta" in event &&
+          typeof event.delta === "string"
+        ) {
+          outputChars += event.delta.length;
+        }
+
+        if (event.type === "tool.call.started") {
+          toolCallCount += 1;
         }
 
         reply.raw.write(serializeSseEvent(event.type, event));
       }
+
+      writeRequestAuditEvent(
+        request,
+        "chat.stream",
+        emittedFailureEvent ? "failed" : "completed",
+        {
+          ...auditDetails,
+          outputChars,
+          toolCallCount,
+          code: failureCode,
+          reason: failureReason
+        }
+      );
     } catch (error) {
       const appError =
         error instanceof AppError
@@ -410,66 +508,131 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
             type: "response.failed",
             sessionId: body.sessionId,
             error: appError.message,
-            code: appError.code
-          })
+              code: appError.code
+            })
         );
       }
+
+      writeRequestAuditEvent(request, "chat.stream", getSecurityAuditStatus(appError), {
+        ...auditDetails,
+        outputChars,
+        toolCallCount,
+        code: appError.code,
+        reason: appError.message
+      });
     } finally {
       reply.raw.end();
     }
   });
 
   app.post("/api/sql/validate", async (request) => {
-    const body = request.body as { sql?: string };
+    const body = request.body as { sql?: string; role?: UserRole };
 
-    if (typeof body?.sql !== "string") {
-      throw new AppError("sql is required", "SQL_REQUIRED", 400);
-    }
-
-    assertSqlRequestSecurity(body, requestSecurityPolicy);
-
-    const result = validateSqlStatement(body.sql, {
-      tables: metadataCatalog.tables,
-      maxLimit: DEFAULT_SQL_LIMIT
-    });
-
-    app.log.info(
+    return await runAuditedRequest(
+      request,
+      "sql.validate",
       {
+        sqlChars: typeof body?.sql === "string" ? body.sql.length : undefined,
+        role: body?.role
+      },
+      () => {
+        if (typeof body?.sql !== "string") {
+          throw new AppError("sql is required", "SQL_REQUIRED", 400);
+        }
+
+        assertSqlRequestSecurity(body, requestSecurityPolicy);
+        assertSqlRoleRequestInput(body);
+
+        const validation = validateSqlStatement(body.sql, {
+          tables: metadataCatalog.tables,
+          maxLimit: DEFAULT_SQL_LIMIT
+        });
+        const role = resolveSqlReadRole(body.role, config.sqlAccess);
+        const accessDecision = validation.allowed
+          ? authorizeSqlStatementAccess(
+              validation.normalizedSql,
+              metadataCatalog,
+              role,
+              config.sqlAccess
+            )
+          : undefined;
+        const result =
+          validation.allowed && accessDecision && !accessDecision.allowed
+            ? {
+                ...validation,
+                allowed: false,
+                reason: accessDecision.reason ?? validation.reason
+              }
+            : validation;
+
+        app.log.info(
+          {
+            allowed: result.allowed,
+            role,
+            referencedTables: result.referencedTables,
+            limit: result.limit
+          },
+          "sql validation completed"
+        );
+
+        return result;
+      },
+      (result) => ({
         allowed: result.allowed,
         referencedTables: result.referencedTables,
         limit: result.limit
-      },
-      "sql validation completed"
+      }),
+      (result) => !result.allowed
     );
-
-    return result;
   });
 
   app.post("/api/sql/query", async (request) => {
-    const body = request.body as { sql?: string };
+    const body = request.body as { sql?: string; role?: UserRole };
 
-    if (typeof body?.sql !== "string") {
-      throw new AppError("sql is required", "SQL_REQUIRED", 400);
-    }
-
-    assertSqlRequestSecurity(body, requestSecurityPolicy);
-
-    const result = await executeValidatedSqlQuery(
-      body.sql,
-      metadataCatalog,
-      getReadOnlyQueryExecutor(queryExecutor)
-    );
-
-    app.log.info(
+    return await runAuditedRequest(
+      request,
+      "sql.query",
       {
+        sqlChars: typeof body?.sql === "string" ? body.sql.length : undefined,
+        role: body?.role
+      },
+      async () => {
+        if (typeof body?.sql !== "string") {
+          throw new AppError("sql is required", "SQL_REQUIRED", 400);
+        }
+
+        assertSqlRequestSecurity(body, requestSecurityPolicy);
+        assertSqlRoleRequestInput(body);
+        const role = resolveSqlReadRole(body.role, config.sqlAccess);
+
+        const result = await executeValidatedSqlQuery(
+          body.sql,
+          metadataCatalog,
+          getReadOnlyQueryExecutor(queryExecutor),
+          role,
+          config.sqlAccess
+        );
+
+        app.log.info(
+          {
+            role,
+            rowCount: result.rowCount,
+            columnCount: result.columns.length,
+            durationMs: result.durationMs
+          },
+          "sql query executed"
+        );
+
+        return result;
+      },
+      (result) => ({
         rowCount: result.rowCount,
         columnCount: result.columns.length,
-        durationMs: result.durationMs
-      },
-      "sql query executed"
+        durationMs: result.durationMs,
+        referencedTables: result.validation.referencedTables,
+        limit: result.validation.limit
+      })
     );
-
-    return result;
   });
 
   app.post("/api/sql/limit", async (request) => {
@@ -489,6 +652,7 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       tableName?: string;
       columns?: readonly string[];
       limit?: number;
+      role?: UserRole;
     };
 
     if (typeof body?.tableName !== "string") {
@@ -496,6 +660,7 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     }
 
     assertSqlSuggestionRequestSecurity(body, requestSecurityPolicy);
+    assertSqlRoleRequestInput(body);
 
     const sql = buildSqlAwareSelectQuery(
       {
@@ -508,9 +673,13 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
         maxLimit: DEFAULT_SQL_LIMIT
       }
     );
+    const role = resolveSqlReadRole(body.role, config.sqlAccess);
+
+    assertSqlStatementAccess(sql, metadataCatalog, role, config.sqlAccess);
 
     app.log.info(
       {
+        role,
         tableName: body.tableName,
         columnCount: body.columns?.length ?? 0,
         limit: body.limit
@@ -662,25 +831,43 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       action?: "read" | "write" | "delete";
     };
 
-    if (
-      typeof body?.role !== "string" ||
-      typeof body.tenantId !== "string" ||
-      typeof body.resourceTenantId !== "string" ||
-      typeof body.action !== "string"
-    ) {
-      throw new AppError("Invalid security request", "INVALID_SECURITY_REQUEST", 400);
-    }
+    return await runAuditedRequest(
+      request,
+      "security.check",
+      {
+        role: body?.role,
+        action: body?.action,
+        tenantId: body?.tenantId,
+        resourceTenantId: body?.resourceTenantId
+      },
+      () => {
+        if (
+          typeof body?.role !== "string" ||
+          typeof body.tenantId !== "string" ||
+          typeof body.resourceTenantId !== "string" ||
+          typeof body.action !== "string"
+        ) {
+          throw new AppError("Invalid security request", "INVALID_SECURITY_REQUEST", 400);
+        }
 
-    assertAccessRequestInput(body, requestSecurityPolicy);
+        assertAccessRequestInput(body, requestSecurityPolicy);
 
-    return {
-      decision: authorizeAccess({
-        role: body.role,
-        tenantId: body.tenantId,
-        resourceTenantId: body.resourceTenantId,
-        action: body.action
-      })
-    };
+        return {
+          decision: authorizeAccess({
+            role: body.role,
+            tenantId: body.tenantId,
+            resourceTenantId: body.resourceTenantId,
+            action: body.action
+          })
+        };
+      },
+      (result) => ({
+        allowed: result.decision.allowed,
+        decisionCode: result.decision.code,
+        decisionReason: result.decision.reason
+      }),
+      (result) => !result.decision.allowed
+    );
   });
 
   app.log.info(
@@ -698,14 +885,21 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
 export function buildToolRegistry(
   getMetadataCatalog: () => PrismaSchemaCatalog,
   queryExecutor?: ReadOnlyQueryExecutor,
-  options: ToolRegistryOptions = {}
+  options: ToolRegistryOptions = {},
+  securityOptions: {
+    readonly sqlAccessPolicy?: SqlReadAccessPolicy;
+    readonly sqlRole?: UserRole;
+  } = {}
 ): ToolRegistry {
   const toolRegistry = new ToolRegistry(options);
+  const sqlAccessPolicy = securityOptions.sqlAccessPolicy;
+  const sqlRole = securityOptions.sqlRole ?? sqlAccessPolicy?.defaultRole ?? "analyst";
+  const builtInTools: ToolDefinition[] = [];
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "search-metadata",
     description:
-      "Search the active schema catalog for tables, columns, and relations. Use this before SQL generation when a user asks a natural-language data question, including Chinese business terms such as 订单/order, 客户/customer, or 事件/event.",
+      "Search the active schema catalog for tables, columns, and relations. Use this before SQL generation when a user asks a natural-language data question, including business terms such as order, customer, or event.",
     inputSchema: {
       type: "object",
       properties: {
@@ -782,7 +976,7 @@ export function buildToolRegistry(
     }
   });
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "validate-sql",
     description:
       "Validate a SQL statement for safe execution against the active metadata catalog",
@@ -798,14 +992,36 @@ export function buildToolRegistry(
       timeoutMs: 2_000,
       retries: 0
     },
-    execute: (input: { sql: string }) =>
-      validateSqlStatement(input.sql, {
+    execute: (input: { sql: string }) => {
+      const validation = validateSqlStatement(input.sql, {
         tables: getMetadataCatalog().tables,
         maxLimit: DEFAULT_SQL_LIMIT
-      })
+      });
+
+      if (!validation.allowed || !sqlAccessPolicy) {
+        return validation;
+      }
+
+      const accessDecision = authorizeSqlStatementAccess(
+        validation.normalizedSql,
+        getMetadataCatalog(),
+        sqlRole,
+        sqlAccessPolicy
+      );
+
+      if (!accessDecision.allowed) {
+        return {
+          ...validation,
+          allowed: false,
+          reason: accessDecision.reason ?? validation.reason
+        };
+      }
+
+      return validation;
+    }
   });
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "generate-sql",
     description:
       "Generate a metadata-aware safe SELECT statement for an explicit table and optional columns. Use search-metadata first when the table name is uncertain.",
@@ -830,8 +1046,8 @@ export function buildToolRegistry(
       tableName: string;
       columns?: readonly string[];
       limit?: number;
-    }) =>
-      buildSqlAwareSelectQuery(
+    }) => {
+      const sql = buildSqlAwareSelectQuery(
         {
           tableName: input.tableName,
           columns: input.columns,
@@ -841,11 +1057,18 @@ export function buildToolRegistry(
           tables: getMetadataCatalog().tables,
           maxLimit: DEFAULT_SQL_LIMIT
         }
-      )
+      );
+
+      if (sqlAccessPolicy) {
+        assertSqlStatementAccess(sql, getMetadataCatalog(), sqlRole, sqlAccessPolicy);
+      }
+
+      return sql;
+    }
   });
 
   if (queryExecutor) {
-    toolRegistry.register({
+    builtInTools.push({
       name: "query-sql",
       description:
         "Execute a validated read-only SQL statement and return rows. Use this for factual database answers, including record counts such as select count(*) as count from table limit 1.",
@@ -862,11 +1085,17 @@ export function buildToolRegistry(
         retries: 0
       },
       execute: async (input: { sql: string }) =>
-        await executeValidatedSqlQuery(input.sql, getMetadataCatalog(), queryExecutor)
+        await executeValidatedSqlQuery(
+          input.sql,
+          getMetadataCatalog(),
+          queryExecutor,
+          sqlRole,
+          sqlAccessPolicy
+        )
     });
   }
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "summarize-series",
     description: "Summarize a numeric series",
     inputSchema: {
@@ -887,7 +1116,7 @@ export function buildToolRegistry(
     execute: (input: { points: readonly number[] }) => summarizeSeries(input.points)
   });
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "profile-dataset",
     description: "Profile tabular JSON rows for BI field statistics and quality warnings",
     inputSchema: {
@@ -922,7 +1151,7 @@ export function buildToolRegistry(
       })
   });
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "analyze-time-series",
     description: "Analyze time series points for trend, cadence, moving average, and anomalies",
     inputSchema: {
@@ -962,7 +1191,7 @@ export function buildToolRegistry(
       })
   });
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "suggest-chart",
     description: "Suggest a chart type and build chart option metadata",
     inputSchema: {
@@ -1005,7 +1234,7 @@ export function buildToolRegistry(
     }
   });
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "recommend-charts",
     description: "Recommend charts from a dataset profile",
     inputSchema: {
@@ -1034,7 +1263,7 @@ export function buildToolRegistry(
       })
   });
 
-  toolRegistry.register({
+  builtInTools.push({
     name: "check-access",
     description: "Check whether an action is permitted for a tenant-scoped user",
     inputSchema: {
@@ -1066,7 +1295,74 @@ export function buildToolRegistry(
     }) => authorizeAccess(input)
   });
 
+  toolRegistry.registerDiscovered(builtInTools, {
+    sourceName: "api-builtins"
+  });
+
   return toolRegistry;
+}
+
+interface AuditedRequestLike {
+  readonly id: string;
+  readonly url: string;
+  readonly routeOptions?: {
+    readonly url?: string;
+  };
+}
+
+async function runAuditedRequest<T>(
+  request: AuditedRequestLike,
+  action: string,
+  details: Readonly<Record<string, unknown>> | undefined,
+  operation: () => Promise<T> | T,
+  summarizeResult?: (result: T) => Readonly<Record<string, unknown>> | undefined,
+  isBlockedResult?: (result: T) => boolean
+): Promise<T> {
+  try {
+    const result = await operation();
+
+    writeRequestAuditEvent(
+      request,
+      action,
+      isBlockedResult?.(result) ? "blocked" : "completed",
+      {
+        ...details,
+        ...summarizeResult?.(result)
+      }
+    );
+
+    return result;
+  } catch (error) {
+    writeRequestAuditEvent(request, action, getSecurityAuditStatus(error), {
+      ...details,
+      code: error instanceof AppError ? error.code : undefined,
+      reason: safeErrorMessage(error)
+    });
+    throw error;
+  }
+}
+
+function writeRequestAuditEvent(
+  request: AuditedRequestLike,
+  action: string,
+  status: SecurityAuditStatus,
+  details?: Readonly<Record<string, unknown>>
+): void {
+  writeSecurityAuditEvent({
+    action,
+    status,
+    requestId: request.id,
+    route: request.routeOptions?.url ?? request.url,
+    details
+  });
+}
+
+function getSecurityAuditStatus(error: unknown): SecurityAuditStatus {
+  if (error instanceof AppError && error.statusCode < 500) {
+    return "blocked";
+  }
+
+  return "failed";
 }
 
 function expandMetadataSearchQueries(query: string): readonly string[] {
@@ -1157,10 +1453,61 @@ function getReadOnlyQueryExecutor(
   return queryExecutor;
 }
 
+function resolveSqlReadRole(
+  requestedRole: UserRole | undefined,
+  sqlAccessPolicy: SqlReadAccessPolicy
+): UserRole {
+  return requestedRole ?? sqlAccessPolicy.defaultRole;
+}
+
+function authorizeSqlStatementAccess(
+  sql: string,
+  metadataCatalog: PrismaSchemaCatalog,
+  role: UserRole,
+  sqlAccessPolicy: SqlReadAccessPolicy
+) {
+  const readTargets = collectSqlReadTargets(sql, {
+    tables: metadataCatalog.tables,
+    maxLimit: DEFAULT_SQL_LIMIT
+  });
+
+  return authorizeSqlReadAccess(
+    {
+      role,
+      referencedTables: readTargets.referencedTables,
+      referencedColumns: readTargets.resolvedColumns
+    },
+    sqlAccessPolicy
+  );
+}
+
+function assertSqlStatementAccess(
+  sql: string,
+  metadataCatalog: PrismaSchemaCatalog,
+  role: UserRole,
+  sqlAccessPolicy: SqlReadAccessPolicy
+): void {
+  const readTargets = collectSqlReadTargets(sql, {
+    tables: metadataCatalog.tables,
+    maxLimit: DEFAULT_SQL_LIMIT
+  });
+
+  assertSqlReadAccess(
+    {
+      role,
+      referencedTables: readTargets.referencedTables,
+      referencedColumns: readTargets.resolvedColumns
+    },
+    sqlAccessPolicy
+  );
+}
+
 async function executeValidatedSqlQuery(
   sql: string,
   metadataCatalog: PrismaSchemaCatalog,
-  queryExecutor: ReadOnlyQueryExecutor
+  queryExecutor: ReadOnlyQueryExecutor,
+  role?: UserRole,
+  sqlAccessPolicy?: SqlReadAccessPolicy
 ): Promise<{
   readonly columns: readonly string[];
   readonly rows: readonly Readonly<Record<string, unknown>>[];
@@ -1177,6 +1524,27 @@ async function executeValidatedSqlQuery(
     throw new AppError(validation.reason ?? "SQL is not allowed", "SQL_NOT_ALLOWED", 400, {
       validation
     });
+  }
+
+  if (role && sqlAccessPolicy) {
+    const accessDecision = authorizeSqlStatementAccess(
+      validation.normalizedSql,
+      metadataCatalog,
+      role,
+      sqlAccessPolicy
+    );
+
+    if (!accessDecision.allowed) {
+      throw new AppError(
+        accessDecision.reason ?? "SQL read access denied",
+        accessDecision.code ?? "SQL_ACCESS_DENIED",
+        403,
+        {
+          validation,
+          accessDecision
+        }
+      );
+    }
   }
 
   const result = await queryExecutor.executeReadOnlyQuery(validation.normalizedSql);

@@ -2,10 +2,37 @@ import { AppError, createLogger } from "@clusterdata/shared";
 
 export type UserRole = "admin" | "analyst" | "viewer";
 export type AccessAction = "read" | "write" | "delete";
+export type SecurityAuditStatus = "completed" | "blocked" | "failed";
 
 const logger = createLogger("security");
+const auditLogger = createLogger("security.audit");
 const USER_ROLES = ["admin", "analyst", "viewer"] as const;
 const ACCESS_ACTIONS = ["read", "write", "delete"] as const;
+const PROMPT_INJECTION_RULES = [
+  {
+    code: "IGNORE_PRIOR_INSTRUCTIONS",
+    pattern:
+      /\bignore\b[\s\S]{0,40}\b(previous|prior|above|earlier)\b[\s\S]{0,20}\b(instructions?|prompts?|messages?)\b/i
+  },
+  {
+    code: "REVEAL_SYSTEM_PROMPT",
+    pattern:
+      /\b(reveal|show|print|display|dump|expose)\b[\s\S]{0,50}\b(system|developer)\b[\s\S]{0,20}\b(prompt|message|instructions?)\b/i
+  },
+  {
+    code: "BYPASS_GUARDRAILS",
+    pattern:
+      /\b(bypass|disable|override)\b[\s\S]{0,30}\b(guardrails?|filters?|safety|restrictions?)\b/i
+  },
+  {
+    code: "ROLE_SYSTEM_OVERRIDE",
+    pattern: /(^|[\s([{,])role\s*:\s*system\b/i
+  },
+  {
+    code: "ACT_AS_SYSTEM",
+    pattern: /\b(act as|pretend to be)\b[\s\S]{0,20}\b(system|developer)\b/i
+  }
+] as const;
 
 export interface AccessRequest {
   readonly role: UserRole;
@@ -18,6 +45,45 @@ export interface AccessDecision {
   readonly allowed: boolean;
   readonly reason?: string;
   readonly code?: string;
+}
+
+export interface PromptInjectionAssessment {
+  readonly blocked: boolean;
+  readonly riskLevel: "none" | "high";
+  readonly matchedSignals: readonly string[];
+}
+
+export interface SecurityAuditEvent {
+  readonly action: string;
+  readonly status: SecurityAuditStatus;
+  readonly requestId?: string;
+  readonly route?: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+export interface SqlReadRolePolicy {
+  readonly allowedTables: "*" | readonly string[];
+  readonly blockedColumns: readonly string[];
+}
+
+export interface SqlReadAccessPolicy {
+  readonly defaultRole: UserRole;
+  readonly roles: Readonly<Record<UserRole, SqlReadRolePolicy>>;
+}
+
+export interface SqlReadAccessRequest {
+  readonly role?: UserRole;
+  readonly referencedTables: readonly string[];
+  readonly referencedColumns?: readonly string[];
+}
+
+export interface SqlReadAccessDecision {
+  readonly allowed: boolean;
+  readonly role: UserRole;
+  readonly reason?: string;
+  readonly code?: string;
+  readonly deniedTables?: readonly string[];
+  readonly deniedColumns?: readonly string[];
 }
 
 export interface RequestSecurityPolicy {
@@ -52,6 +118,24 @@ export const DEFAULT_REQUEST_SECURITY_POLICY: RequestSecurityPolicy = {
   maxMetadataSearchChars: 200,
   maxMetadataSearchLimit: 100,
   maxChartRecommendations: 20
+};
+
+export const DEFAULT_SQL_READ_ACCESS_POLICY: SqlReadAccessPolicy = {
+  defaultRole: "analyst",
+  roles: {
+    admin: {
+      allowedTables: "*",
+      blockedColumns: []
+    },
+    analyst: {
+      allowedTables: "*",
+      blockedColumns: []
+    },
+    viewer: {
+      allowedTables: ["Tenant"],
+      blockedColumns: ["Tenant.createdAt"]
+    }
+  }
 };
 
 export function buildRequestSecurityPolicy(
@@ -193,6 +277,176 @@ export function assertChatRequestSecurity(
 
   if (typeof input.model !== "undefined") {
     assertBoundedText(input.model, "model", policy.maxModelChars, "MODEL_NAME_TOO_LARGE");
+  }
+
+  const promptInjectionAssessment = assessPromptInjection(String(input.message));
+
+  if (promptInjectionAssessment.blocked) {
+    rejectSecurityInput(
+      "Chat message looks like a prompt injection attempt",
+      "PROMPT_INJECTION_DETECTED",
+      {
+        matchedSignals: promptInjectionAssessment.matchedSignals,
+        riskLevel: promptInjectionAssessment.riskLevel
+      }
+    );
+  }
+}
+
+export function buildSqlReadAccessPolicy(
+  overrides: Partial<{
+    readonly defaultRole: UserRole;
+    readonly roles: Partial<
+      Record<
+        UserRole,
+        Partial<{
+          readonly allowedTables: "*" | readonly string[];
+          readonly blockedColumns: readonly string[];
+        }>
+      >
+    >;
+  }> = {}
+): SqlReadAccessPolicy {
+  const defaultRole = overrides.defaultRole ?? DEFAULT_SQL_READ_ACCESS_POLICY.defaultRole;
+
+  if (!isUserRole(defaultRole)) {
+    throw new AppError("Invalid SQL access default role", "INVALID_SQL_ACCESS_POLICY", 500, {
+      defaultRole
+    });
+  }
+
+  const roles = Object.fromEntries(
+    USER_ROLES.map((role) => {
+      const roleOverrides = overrides.roles?.[role] ?? {};
+      const defaultPolicy = DEFAULT_SQL_READ_ACCESS_POLICY.roles[role];
+      const allowedTables = roleOverrides.allowedTables ?? defaultPolicy.allowedTables;
+      const blockedColumns = roleOverrides.blockedColumns ?? defaultPolicy.blockedColumns;
+
+      return [
+        role,
+        {
+          allowedTables: normalizeAllowedTablesPolicy(role, allowedTables),
+          blockedColumns: normalizePermissionList(role, blockedColumns, "blockedColumns")
+        }
+      ];
+    })
+  ) as Record<UserRole, SqlReadRolePolicy>;
+
+  return {
+    defaultRole,
+    roles
+  };
+}
+
+export function authorizeSqlReadAccess(
+  request: SqlReadAccessRequest,
+  policy = DEFAULT_SQL_READ_ACCESS_POLICY
+): SqlReadAccessDecision {
+  const role = request.role ?? policy.defaultRole;
+
+  if (!isUserRole(role)) {
+    return {
+      allowed: false,
+      role: policy.defaultRole,
+      reason: "Invalid SQL access role",
+      code: "INVALID_SQL_ACCESS_ROLE"
+    };
+  }
+
+  const rolePolicy = policy.roles[role];
+  const normalizedAllowedTables =
+    rolePolicy.allowedTables === "*"
+      ? "*"
+      : new Set(rolePolicy.allowedTables.map((tableName) => canonicalSqlPermissionName(tableName)));
+  const deniedTables =
+    normalizedAllowedTables === "*"
+      ? []
+      : dedupePermissionList(
+          request.referencedTables.filter(
+            (tableName) =>
+              !normalizedAllowedTables.has(canonicalSqlPermissionName(tableName))
+          )
+        );
+
+  if (deniedTables.length > 0) {
+    return {
+      allowed: false,
+      role,
+      reason: `Role ${role} cannot read tables: ${deniedTables.join(", ")}`,
+      code: "SQL_TABLE_ACCESS_DENIED",
+      deniedTables
+    };
+  }
+
+  const blockedColumns = new Set(
+    rolePolicy.blockedColumns.map((columnName) => canonicalSqlPermissionName(columnName))
+  );
+  const deniedColumns = dedupePermissionList(
+    (request.referencedColumns ?? []).filter((columnName) =>
+      blockedColumns.has(canonicalSqlPermissionName(columnName))
+    )
+  );
+
+  if (deniedColumns.length > 0) {
+    return {
+      allowed: false,
+      role,
+      reason: `Role ${role} cannot read columns: ${deniedColumns.join(", ")}`,
+      code: "SQL_COLUMN_ACCESS_DENIED",
+      deniedColumns
+    };
+  }
+
+  return {
+    allowed: true,
+    role
+  };
+}
+
+export function assertSqlReadAccess(
+  request: SqlReadAccessRequest,
+  policy = DEFAULT_SQL_READ_ACCESS_POLICY
+): void {
+  const decision = authorizeSqlReadAccess(request, policy);
+
+  if (decision.allowed) {
+    return;
+  }
+
+  const statusCode = decision.code === "INVALID_SQL_ACCESS_ROLE" ? 400 : 403;
+
+  logger.warn("sql read access denied", {
+    code: decision.code,
+    role: decision.role,
+    deniedTables: decision.deniedTables,
+    deniedColumns: decision.deniedColumns,
+    referencedTables: request.referencedTables,
+    referencedColumns: request.referencedColumns
+  });
+
+  throw new AppError(
+    decision.reason ?? "SQL read access denied",
+    decision.code ?? "SQL_ACCESS_DENIED",
+    statusCode,
+    {
+      role: decision.role,
+      deniedTables: decision.deniedTables,
+      deniedColumns: decision.deniedColumns
+    }
+  );
+}
+
+export function assertSqlRoleRequestInput(input: {
+  readonly role?: unknown;
+}): asserts input is { readonly role?: UserRole } {
+  if (typeof input.role === "undefined") {
+    return;
+  }
+
+  if (!isUserRole(input.role)) {
+    rejectSecurityInput("Invalid SQL access role", "INVALID_SQL_ACCESS_ROLE", {
+      allowedRoles: USER_ROLES
+    });
   }
 }
 
@@ -438,6 +692,36 @@ export function assertMetadataSearchRequestSecurity(
   }
 }
 
+export function assessPromptInjection(message: string): PromptInjectionAssessment {
+  const matchedSignals = PROMPT_INJECTION_RULES.filter((rule) => rule.pattern.test(message)).map(
+    (rule) => rule.code
+  );
+
+  return {
+    blocked: matchedSignals.length > 0,
+    riskLevel: matchedSignals.length > 0 ? "high" : "none",
+    matchedSignals
+  };
+}
+
+export function writeSecurityAuditEvent(event: SecurityAuditEvent): void {
+  const context = compactLogContext({
+    action: event.action,
+    status: event.status,
+    requestId: event.requestId,
+    route: event.route,
+    details:
+      typeof event.details === "undefined" ? undefined : compactLogContext(event.details)
+  });
+
+  if (event.status === "blocked" || event.status === "failed") {
+    auditLogger.warn("security audit event", context);
+    return;
+  }
+
+  auditLogger.info("security audit event", context);
+}
+
 function assertChartProfileSecurity(
   profile: unknown,
   policy: RequestSecurityPolicy
@@ -605,5 +889,70 @@ function rejectSecurityInput(
 
 function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function compactLogContext(
+  context: Readonly<Record<string, unknown>>
+): Readonly<Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(context).filter(([_key, value]) => typeof value !== "undefined")
+  );
+}
+
+function normalizeAllowedTablesPolicy(
+  role: UserRole,
+  value: "*" | readonly string[]
+): "*" | readonly string[] {
+  if (value === "*") {
+    return value;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new AppError("Invalid SQL allowed tables policy", "INVALID_SQL_ACCESS_POLICY", 500, {
+      role,
+      value
+    });
+  }
+
+  return normalizePermissionList(role, value, "allowedTables");
+}
+
+function normalizePermissionList(
+  role: UserRole,
+  values: readonly string[],
+  fieldName: "allowedTables" | "blockedColumns"
+): readonly string[] {
+  if (!Array.isArray(values)) {
+    throw new AppError("Invalid SQL permission list", "INVALID_SQL_ACCESS_POLICY", 500, {
+      role,
+      fieldName,
+      values
+    });
+  }
+
+  return dedupePermissionList(
+    values.map((value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw new AppError("Invalid SQL permission entry", "INVALID_SQL_ACCESS_POLICY", 500, {
+          role,
+          fieldName,
+          value
+        });
+      }
+
+      return value.trim();
+    })
+  );
+}
+
+function dedupePermissionList(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+function canonicalSqlPermissionName(value: string): string {
+  return value
+    .split(".")
+    .map((part) => part.replace(/["`]/g, "").trim().toLowerCase().replace(/[_\s-]/g, ""))
+    .join(".");
 }
 

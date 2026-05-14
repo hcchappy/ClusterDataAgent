@@ -102,6 +102,70 @@ describe("web api helpers", () => {
     );
   });
 
+  it("passes role-aware SQL requests when provided", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          allowed: false,
+          normalizedSql: "select createdAt from Tenant limit 1",
+          reason: "Role viewer cannot read columns: Tenant.createdAt"
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+
+    await validateSql("select createdAt from Tenant limit 1", {
+      role: "viewer"
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:3001/api/sql/validate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          sql: "select createdAt from Tenant limit 1",
+          role: "viewer"
+        })
+      })
+    );
+  });
+
+  it("passes role-aware SQL query requests when provided", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          columns: ["id"],
+          rows: [{ id: "tenant-a" }],
+          rowCount: 1,
+          durationMs: 9,
+          validation: {
+            allowed: true,
+            normalizedSql: "select id from Tenant limit 1",
+            referencedTables: ["Tenant"],
+            referencedColumns: ["id"],
+            limit: 1
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+
+    await executeSqlQuery("select id from Tenant limit 1", {
+      role: "viewer"
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:3001/api/sql/query",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          sql: "select id from Tenant limit 1",
+          role: "viewer"
+        })
+      })
+    );
+  });
+
   it("calls dataset profile endpoint", async () => {
     const profile: DatasetProfile = {
       rowCount: 1,

@@ -89,6 +89,10 @@ export interface AccessDecision {
   readonly code?: string;
 }
 
+export interface SqlRequestOptions {
+  readonly role?: UserRole;
+}
+
 export type ChatStreamEvent =
   | {
       readonly type: "session.started";
@@ -162,17 +166,29 @@ export async function requestJson<T>(
   return payload;
 }
 
-export async function validateSql(sql: string): Promise<SqlValidationResult> {
+export async function validateSql(
+  sql: string,
+  options: SqlRequestOptions = {}
+): Promise<SqlValidationResult> {
   return await requestJson<SqlValidationResult>("/api/sql/validate", {
     method: "POST",
-    body: JSON.stringify({ sql })
+    body: JSON.stringify({
+      sql,
+      ...(options.role ? { role: options.role } : {})
+    })
   });
 }
 
-export async function executeSqlQuery(sql: string): Promise<SqlQueryResult> {
+export async function executeSqlQuery(
+  sql: string,
+  options: SqlRequestOptions = {}
+): Promise<SqlQueryResult> {
   return await requestJson<SqlQueryResult>("/api/sql/query", {
     method: "POST",
-    body: JSON.stringify({ sql })
+    body: JSON.stringify({
+      sql,
+      ...(options.role ? { role: options.role } : {})
+    })
   });
 }
 

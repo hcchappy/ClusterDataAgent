@@ -1,0 +1,107 @@
+{"timestamp":"2026-05-13T17:13:06.099Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T17:13:06.104Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T17:13:06.106Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T17:13:06.108Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T17:13:06.109Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778692386125,"pid":13428,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T17:13:06.125Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T17:13:06.135Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778692386135,"pid":13428,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+{"level":30,"time":1778692421098,"pid":13428,"hostname":"DESKTOP-5203HH1","reqId":"req-1","req":{"method":"GET","url":"/health","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":63015},"msg":"incoming request"}
+{"level":30,"time":1778692421102,"pid":13428,"hostname":"DESKTOP-5203HH1","reqId":"req-1","res":{"statusCode":200},"responseTime":3.712100001052022,"msg":"request completed"}
+{"level":30,"time":1778692430546,"pid":13428,"hostname":"DESKTOP-5203HH1","reqId":"req-2","req":{"method":"GET","url":"/health","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":51548},"msg":"incoming request"}
+{"level":30,"time":1778692430546,"pid":13428,"hostname":"DESKTOP-5203HH1","reqId":"req-2","res":{"statusCode":200},"responseTime":0.36189999990165234,"msg":"request completed"}
+01:52:44 [tsx] change in ./..\..\packages\tool-system\src\index.ts Restarting...
+c{"timestamp":"2026-05-13T17:52:45.655Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T17:52:45.659Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T17:52:45.660Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T17:52:45.662Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T17:52:45.662Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778694765676,"pid":9496,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T17:52:45.677Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T17:52:45.687Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778694765686,"pid":9496,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+02:14:37 [tsx] change in ./src\app.ts Restarting...
+c{"timestamp":"2026-05-13T18:14:38.862Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T18:14:38.866Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T18:14:38.868Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T18:14:38.869Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T18:14:38.870Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778696078884,"pid":2956,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T18:14:38.884Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T18:14:38.894Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778696078894,"pid":2956,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+02:17:05 [tsx] change in ./src\app.ts Restarting...
+c{"timestamp":"2026-05-13T18:17:06.456Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T18:17:06.461Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T18:17:06.463Z","level":"info","scope":"tool-system","message":"tool discovery completed","context":{"sourceName":"api-builtins","sourceType":"array","toolCount":9,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts"]}}
+{"timestamp":"2026-05-13T18:17:06.463Z","level":"info","scope":"tool-system","message":"discovered tools registered","context":{"sourceName":"api-builtins","toolCount":9,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts"]}}
+{"timestamp":"2026-05-13T18:17:06.464Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T18:17:06.465Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T18:17:06.465Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778696226479,"pid":11752,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T18:17:06.479Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T18:17:06.489Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778696226489,"pid":11752,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+02:17:36 [tsx] change in ./src\app.ts Restarting...
+c{"timestamp":"2026-05-13T18:17:37.826Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T18:17:37.831Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T18:17:37.832Z","level":"info","scope":"tool-system","message":"tool discovery completed","context":{"sourceName":"api-builtins","sourceType":"array","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T18:17:37.832Z","level":"info","scope":"tool-system","message":"discovered tools registered","context":{"sourceName":"api-builtins","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T18:17:37.833Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T18:17:37.834Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T18:17:37.834Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778696257849,"pid":15376,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T18:17:37.849Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T18:17:37.858Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778696257858,"pid":15376,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+02:18:21 [tsx] change in ./src\app.ts Restarting...
+c{"timestamp":"2026-05-13T18:18:22.572Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T18:18:22.577Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T18:18:22.578Z","level":"info","scope":"tool-system","message":"tool discovery completed","context":{"sourceName":"api-builtins","sourceType":"array","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T18:18:22.578Z","level":"info","scope":"tool-system","message":"discovered tools registered","context":{"sourceName":"api-builtins","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T18:18:22.578Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T18:18:22.579Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T18:18:22.580Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778696302593,"pid":29324,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T18:18:22.593Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T18:18:22.603Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778696302603,"pid":29324,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+03:24:54 [tsx] unlink in ./..\..\packages\chart-engine\src\index.ts Restarting...
+c{"timestamp":"2026-05-13T19:24:55.699Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T19:24:55.705Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T19:24:55.706Z","level":"info","scope":"tool-system","message":"tool discovery completed","context":{"sourceName":"api-builtins","sourceType":"array","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T19:24:55.707Z","level":"info","scope":"tool-system","message":"discovered tools registered","context":{"sourceName":"api-builtins","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T19:24:55.707Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T19:24:55.708Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T19:24:55.708Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778700295723,"pid":30172,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T19:24:55.723Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T19:24:55.735Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778700295734,"pid":30172,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+05:06:31 [tsx] change in ./..\..\packages\chart-engine\src\index.ts Restarting...
+c{"timestamp":"2026-05-13T21:06:32.260Z","level":"info","scope":"api","message":"postgres metadata catalog loaded","context":{"schemaName":"public","tableCount":5,"relationCount":3}}
+{"timestamp":"2026-05-13T21:06:32.263Z","level":"info","scope":"api","message":"using postgres read-only query executor","context":{"host":"127.0.0.1"}}
+{"timestamp":"2026-05-13T21:06:32.265Z","level":"info","scope":"tool-system","message":"tool discovery completed","context":{"sourceName":"api-builtins","sourceType":"array","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T21:06:32.265Z","level":"info","scope":"tool-system","message":"discovered tools registered","context":{"sourceName":"api-builtins","toolCount":10,"toolNames":["search-metadata","validate-sql","generate-sql","query-sql","summarize-series","profile-dataset","analyze-time-series","suggest-chart","recommend-charts","check-access"]}}
+{"timestamp":"2026-05-13T21:06:32.265Z","level":"info","scope":"api","message":"using file-backed agent session store","context":{"filePath":".codex/data/agent-sessions.json","memoryLimit":20}}
+{"timestamp":"2026-05-13T21:06:32.266Z","level":"info","scope":"api","message":"session store loaded","context":{"filePath":".codex/data/agent-sessions.json","sessionCount":6}}
+{"timestamp":"2026-05-13T21:06:32.267Z","level":"info","scope":"api","message":"metadata catalog loaded","context":{"sourcePath":"postgresql://public","tableCount":5,"relationCount":3}}
+{"level":30,"time":1778706392280,"pid":31992,"hostname":"DESKTOP-5203HH1","host":"127.0.0.1","port":3001,"msg":"api configured"}
+{"timestamp":"2026-05-13T21:06:32.280Z","level":"info","scope":"api","message":"API app constructed","context":{"host":"127.0.0.1","port":3001}}
+{"timestamp":"2026-05-13T21:06:32.290Z","level":"info","scope":"api-server","message":"API server listening","context":{"host":"127.0.0.1","port":3001}}
+{"level":30,"time":1778706392289,"pid":31992,"hostname":"DESKTOP-5203HH1","msg":"Server listening at http://127.0.0.1:3001"}
+{"level":30,"time":1778718102826,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-1","req":{"method":"OPTIONS","url":"/api/overview","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":62741},"msg":"incoming request"}
+{"level":30,"time":1778718102830,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-1","res":{"statusCode":204},"responseTime":4.044900000095367,"msg":"request completed"}
+{"level":30,"time":1778718102831,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-2","req":{"method":"GET","url":"/api/overview","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":62741},"msg":"incoming request"}
+{"level":30,"time":1778718102833,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-2","res":{"statusCode":200},"responseTime":2.519599996507168,"msg":"request completed"}
+{"level":30,"time":1778718102834,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-3","req":{"method":"OPTIONS","url":"/api/overview","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":65170},"msg":"incoming request"}
+{"level":30,"time":1778718102835,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-3","res":{"statusCode":204},"responseTime":0.41530000418424606,"msg":"request completed"}
+{"level":30,"time":1778745729272,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-4","req":{"method":"OPTIONS","url":"/api/overview","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":54405},"msg":"incoming request"}
+{"level":30,"time":1778745729272,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-4","res":{"statusCode":204},"responseTime":0.3286999985575676,"msg":"request completed"}
+{"level":30,"time":1778745729273,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-5","req":{"method":"OPTIONS","url":"/api/overview","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":54405},"msg":"incoming request"}
+{"level":30,"time":1778745729274,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-5","res":{"statusCode":204},"responseTime":0.28599999845027924,"msg":"request completed"}
+{"level":30,"time":1778745729274,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-6","req":{"method":"GET","url":"/api/overview","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":64869},"msg":"incoming request"}
+{"level":30,"time":1778745729274,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-6","res":{"statusCode":200},"responseTime":0.44860000163316727,"msg":"request completed"}
+{"level":30,"time":1778745729276,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-7","req":{"method":"GET","url":"/api/overview","host":"127.0.0.1:3001","remoteAddress":"127.0.0.1","remotePort":54405},"msg":"incoming request"}
+{"level":30,"time":1778745729278,"pid":31992,"hostname":"DESKTOP-5203HH1","reqId":"req-7","res":{"statusCode":200},"responseTime":2.068199999630451,"msg":"request completed"}

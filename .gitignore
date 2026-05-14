@@ -2,8 +2,8 @@ node_modules/
 .turbo/
 dist/
 coverage/
+.husky/_/
 
 .env.local
 .env.*.local
 .DS_Store
-

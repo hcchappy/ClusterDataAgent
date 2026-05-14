@@ -44,6 +44,14 @@ export interface SqlValidationResult {
   readonly limit?: number;
 }
 
+export interface SqlReadTarget {
+  readonly normalizedSql: string;
+  readonly referencedTables: readonly string[];
+  readonly referencedColumns: readonly string[];
+  readonly resolvedColumns: readonly string[];
+  readonly limit?: number;
+}
+
 export interface SafeSelectQueryRequest {
   readonly tableName: string;
   readonly columns?: readonly string[];
@@ -76,6 +84,7 @@ interface QueryValidationContext {
   readonly metadata?: MetadataIndex;
   readonly referencedTables: Set<string>;
   readonly referencedColumns: Set<string>;
+  readonly resolvedColumns: Set<string>;
   readonly ctes: Map<string, CteDefinition>;
 }
 
@@ -92,10 +101,42 @@ interface SelectAnalysisResult {
   readonly columns: ReadonlyMap<string, string>;
 }
 
+interface SqlValidationAnalysis {
+  readonly validation: SqlValidationResult;
+  readonly readTarget?: SqlReadTarget;
+}
+
 export function validateSqlStatement(
   sql: string,
   context?: SqlMetadataContext
 ): SqlValidationResult {
+  return analyzeSqlStatement(sql, context).validation;
+}
+
+export function collectSqlReadTargets(
+  sql: string,
+  context?: SqlMetadataContext
+): SqlReadTarget {
+  const analysis = analyzeSqlStatement(sql, context);
+
+  if (!analysis.validation.allowed || !analysis.readTarget) {
+    throw new AppError(
+      analysis.validation.reason ?? "SQL is not allowed",
+      "SQL_NOT_ALLOWED",
+      400,
+      {
+        validation: analysis.validation
+      }
+    );
+  }
+
+  return analysis.readTarget;
+}
+
+function analyzeSqlStatement(
+  sql: string,
+  context?: SqlMetadataContext
+): SqlValidationAnalysis {
   const normalizedSql = sql.trim();
   const startTime = Date.now();
 
@@ -169,6 +210,7 @@ export function validateSqlStatement(
     metadata,
     referencedTables: new Set<string>(),
     referencedColumns: new Set<string>(),
+    resolvedColumns: new Set<string>(),
     ctes: new Map<string, CteDefinition>()
   };
 
@@ -232,11 +274,20 @@ export function validateSqlStatement(
   });
 
   return {
-    allowed: true,
-    normalizedSql,
-    referencedTables: [...validationContext.referencedTables],
-    referencedColumns: [...validationContext.referencedColumns],
-    limit
+    validation: {
+      allowed: true,
+      normalizedSql,
+      referencedTables: [...validationContext.referencedTables],
+      referencedColumns: [...validationContext.referencedColumns],
+      limit
+    },
+    readTarget: {
+      normalizedSql,
+      referencedTables: [...validationContext.referencedTables],
+      referencedColumns: [...validationContext.referencedColumns],
+      resolvedColumns: [...validationContext.resolvedColumns],
+      limit
+    }
   };
 }
 
@@ -276,8 +327,17 @@ function analyzeSelect(
   const columnReferences = collectColumnReferences(select);
 
   for (const columnReference of columnReferences) {
-    validateColumnReference(columnReference, tableBindings, bindingMap, projectionAliases);
+    const resolvedColumns = validateColumnReference(
+      columnReference,
+      tableBindings,
+      bindingMap,
+      projectionAliases
+    );
     validationContext.referencedColumns.add(columnReference.displayName);
+
+    for (const resolvedColumn of resolvedColumns) {
+      validationContext.resolvedColumns.add(resolvedColumn);
+    }
   }
 
   const selectedColumns = inferSelectedColumns(select, tableBindings);
@@ -384,6 +444,13 @@ function buildTableBindings(
     for (const columnName of collectJoinUsingColumns(fromItem)) {
       validateColumnOnBinding(columnName, bindings[bindings.length - 1]);
       validationContext.referencedColumns.add(`${alias}.${columnName}`);
+
+      for (const resolvedColumn of resolveBindingColumns(
+        bindings[bindings.length - 1],
+        columnName
+      )) {
+        validationContext.resolvedColumns.add(resolvedColumn);
+      }
     }
   }
 
@@ -399,7 +466,7 @@ function validateColumnReference(
   tableBindings: readonly TableBinding[],
   bindingMap: ReadonlyMap<string, TableBinding>,
   projectionAliases: ReadonlySet<string>
-): void {
+): readonly string[] {
   if (reference.columnName === "*") {
     if (reference.tableAlias) {
       const binding = bindingMap.get(canonicalName(reference.tableAlias));
@@ -411,9 +478,11 @@ function validateColumnReference(
           400
         );
       }
+
+      return resolveBindingColumns(binding, reference.columnName);
     }
 
-    return;
+    return tableBindings.flatMap((binding) => resolveBindingColumns(binding, reference.columnName));
   }
 
   if (reference.tableAlias) {
@@ -428,7 +497,7 @@ function validateColumnReference(
     }
 
     validateColumnOnBinding(reference.columnName, binding);
-    return;
+    return resolveBindingColumns(binding, reference.columnName);
   }
 
   const matchingBindings = tableBindings.filter((binding) =>
@@ -436,7 +505,7 @@ function validateColumnReference(
   );
 
   if (matchingBindings.length === 1) {
-    return;
+    return resolveBindingColumns(matchingBindings[0], reference.columnName);
   }
 
   if (matchingBindings.length > 1) {
@@ -448,7 +517,7 @@ function validateColumnReference(
   }
 
   if (projectionAliases.has(canonicalName(reference.columnName))) {
-    return;
+    return [];
   }
 
   throw new AppError(`Unknown column reference: ${reference.columnName}`, "UNKNOWN_COLUMN", 400);
@@ -474,6 +543,25 @@ function bindingContainsColumn(binding: TableBinding, columnName: string): boole
   }
 
   return binding.columns.has(canonicalName(columnName));
+}
+
+function resolveBindingColumns(
+  binding: TableBinding,
+  columnName: string
+): readonly string[] {
+  if (binding.source !== "table" || !binding.table) {
+    return [];
+  }
+
+  const table = binding.table;
+
+  if (columnName === "*") {
+    return table.columns.map((column) => `${table.name}.${column.name}`);
+  }
+
+  const resolvedColumnName = binding.columns?.get(canonicalName(columnName));
+
+  return resolvedColumnName ? [`${table.name}.${resolvedColumnName}`] : [];
 }
 
 function collectProjectionAliases(select: Select): ReadonlySet<string> {
@@ -668,7 +756,7 @@ function getLimitValues(limit: Limit | null | undefined): readonly number[] {
     .filter((value): value is number => Number.isInteger(value));
 }
 
-function rejectSql(details: ValidationFailureDetails): SqlValidationResult {
+function rejectSql(details: ValidationFailureDetails): SqlValidationAnalysis {
   logger.info("sql validation completed", {
     allowed: false,
     reason: details.reason,
@@ -678,12 +766,14 @@ function rejectSql(details: ValidationFailureDetails): SqlValidationResult {
   });
 
   return {
-    allowed: false,
-    normalizedSql: details.normalizedSql,
-    reason: details.reason,
-    referencedTables: details.referencedTables,
-    referencedColumns: details.referencedColumns,
-    limit: details.limit
+    validation: {
+      allowed: false,
+      normalizedSql: details.normalizedSql,
+      reason: details.reason,
+      referencedTables: details.referencedTables,
+      referencedColumns: details.referencedColumns,
+      limit: details.limit
+    }
   };
 }
 

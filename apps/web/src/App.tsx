@@ -104,8 +104,10 @@ interface ToolActivity {
 
 const logger = createLogger("web");
 const DEFAULT_SQL = "select o.id, c.name from cda_orders o join cda_customers c on o.customer_id = c.id limit 20";
+const DEFAULT_SQL_ROLE: UserRole = "analyst";
+const USER_ROLE_OPTIONS: readonly UserRole[] = ["admin", "analyst", "viewer"];
 const DEFAULT_SECURITY_CHECK: SecurityCheckRequest = {
-  role: "analyst",
+  role: DEFAULT_SQL_ROLE,
   tenantId: "tenant-a",
   resourceTenantId: "tenant-a",
   action: "read"
@@ -269,7 +271,7 @@ const UI_COPY: Record<Language, UiCopy> = {
     allowed: "allowed",
     blocked: "blocked",
     denied: "denied",
-    sqlHelp: "Validates against metadata, aliases, columns, and limits.",
+    sqlHelp: "Validates against metadata, aliases, columns, limits, and the selected role.",
     checking: "Checking...",
     validateSql: "Validate SQL",
     running: "Running...",
@@ -358,7 +360,7 @@ const UI_COPY: Record<Language, UiCopy> = {
     tutorialItems: [
       "Open the Workbench tab and confirm the agent status is ready or review the credentials message.",
       "Use Conversation for natural-language analysis, SQL checks, dataset summaries, and chart requests.",
-      "Use SQL Guardrail to validate bounded SELECT statements before running read-only queries.",
+      "Use SQL Guardrail to validate bounded SELECT statements with the intended role before running read-only queries.",
       "Paste JSON rows into Dataset Profile, run the profile, then generate chart recommendations.",
       "Use Access Check to verify tenant isolation and role/action decisions before exposing data."
     ],
@@ -579,9 +581,11 @@ export function AppShell({
   onSend,
   onPromptSelect,
   sqlValue,
+  sqlRole,
   sqlResult,
   isValidatingSql,
   onSqlChange,
+  onSqlRoleChange,
   onValidateSql,
   sqlQueryResult,
   sqlHistory,
@@ -620,12 +624,14 @@ export function AppShell({
   readonly onSend: () => void;
   readonly onPromptSelect: (prompt: string) => void;
   readonly sqlValue: string;
+  readonly sqlRole: UserRole;
   readonly sqlResult: SqlValidationResult | null;
   readonly isValidatingSql: boolean;
   readonly sqlQueryResult: SqlQueryResult | null;
   readonly sqlHistory: readonly SqlHistoryEntry[];
   readonly isRunningSql: boolean;
   readonly onSqlChange: (value: string) => void;
+  readonly onSqlRoleChange: (role: UserRole) => void;
   readonly onValidateSql: () => void;
   readonly onRunSql: () => void;
   readonly onReuseSqlHistory: (entry: SqlHistoryEntry) => void;
@@ -788,6 +794,18 @@ export function AppShell({
             }
           >
             <div className="tool-form">
+              <label htmlFor="sql-role-select">{copy.role}</label>
+              <select
+                id="sql-role-select"
+                value={sqlRole}
+                onChange={(event) => onSqlRoleChange(event.target.value as UserRole)}
+              >
+                {USER_ROLE_OPTIONS.map((role) => (
+                  <option key={role} value={role}>
+                    {role}
+                  </option>
+                ))}
+              </select>
               <label htmlFor="sql-input">SQL</label>
               <textarea
                 id="sql-input"
@@ -877,9 +895,11 @@ export function AppShell({
                     })
                   }
                 >
-                  <option value="admin">admin</option>
-                  <option value="analyst">analyst</option>
-                  <option value="viewer">viewer</option>
+                  {USER_ROLE_OPTIONS.map((role) => (
+                    <option key={role} value={role}>
+                      {role}
+                    </option>
+                  ))}
                 </select>
               </label>
               <label>
@@ -1392,6 +1412,7 @@ export default function App(): ReactElement {
   const [statusText, setStatusText] = useState(copy.loadingOverview);
   const [isStreaming, setIsStreaming] = useState(false);
   const [sqlValue, setSqlValue] = useState(DEFAULT_SQL);
+  const [sqlRole, setSqlRole] = useState<UserRole>(DEFAULT_SQL_ROLE);
   const [sqlResult, setSqlResult] = useState<SqlValidationResult | null>(null);
   const [isValidatingSql, setIsValidatingSql] = useState(false);
   const [sqlQueryResult, setSqlQueryResult] = useState<SqlQueryResult | null>(null);
@@ -1601,7 +1622,16 @@ export default function App(): ReactElement {
     setErrorMessage(null);
 
     try {
-      setSqlResult(await validateSql(sqlValue));
+      const result = await validateSql(sqlValue, { role: sqlRole });
+
+      setSqlResult(result);
+      logger.info("sql validation completed", {
+        allowed: result.allowed,
+        role: sqlRole,
+        tableCount: result.referencedTables?.length ?? 0,
+        columnCount: result.referencedColumns?.length ?? 0,
+        limit: result.limit ?? null
+      });
     } catch (error) {
       const message = safeErrorMessage(error);
       logger.error("sql validation failed", { error: message });
@@ -1616,12 +1646,13 @@ export default function App(): ReactElement {
     setErrorMessage(null);
 
     try {
-      const result = await executeSqlQuery(sqlValue);
+      const result = await executeSqlQuery(sqlValue, { role: sqlRole });
       const nextEntry = createSqlHistoryEntry(sqlValue, result);
 
       setSqlResult(result.validation);
       setSqlQueryResult(result);
       logger.info("sql query completed", {
+        role: sqlRole,
         rowCount: result.rowCount,
         columnCount: result.columns.length,
         durationMs: result.durationMs
@@ -1759,6 +1790,7 @@ export default function App(): ReactElement {
         setComposerValue(prompt);
       }}
       sqlValue={sqlValue}
+      sqlRole={sqlRole}
       sqlResult={sqlResult}
       isValidatingSql={isValidatingSql}
       sqlQueryResult={sqlQueryResult}
@@ -1767,6 +1799,12 @@ export default function App(): ReactElement {
       onSqlChange={(value) => {
         setSqlValue(value);
         setSqlQueryResult(null);
+      }}
+      onSqlRoleChange={(role) => {
+        setSqlRole(role);
+        setSqlResult(null);
+        setSqlQueryResult(null);
+        logger.info("sql role selected", { role });
       }}
       onValidateSql={() => {
         void handleValidateSql();

@@ -96,6 +96,15 @@ export interface ToolRegistryOptions {
   readonly logger?: Logger;
 }
 
+export type ToolDiscoverySource =
+  | readonly ToolDefinition[]
+  | Readonly<Record<string, ToolDefinition>>;
+
+export interface ToolDiscoveryOptions {
+  readonly logger?: Logger;
+  readonly sourceName?: string;
+}
+
 interface MutableToolMetrics {
   calls: number;
   successes: number;
@@ -132,6 +141,28 @@ export class ToolRegistry {
       totalDurationMs: 0,
       lastDurationMs: 0
     });
+  }
+
+  public registerDiscovered(
+    source: ToolDiscoverySource,
+    options: ToolDiscoveryOptions = {}
+  ): readonly ToolDefinition[] {
+    const discovered = discoverTools(source, {
+      ...options,
+      logger: options.logger ?? this.logger
+    });
+
+    for (const tool of discovered) {
+      this.register(tool);
+    }
+
+    this.logger.info("discovered tools registered", {
+      sourceName: options.sourceName ?? "anonymous",
+      toolCount: discovered.length,
+      toolNames: discovered.map((tool) => tool.name)
+    });
+
+    return discovered;
   }
 
   public list(): readonly ToolDefinition[] {
@@ -278,6 +309,45 @@ export class ToolRegistry {
   }
 }
 
+export function discoverTools(
+  source: ToolDiscoverySource,
+  options: ToolDiscoveryOptions = {}
+): readonly ToolDefinition[] {
+  const logger = options.logger ?? createLogger("tool-system.discovery");
+  const fromRecord = !Array.isArray(source);
+  const entries = fromRecord ? Object.entries(source) : source.map((tool) => [tool.name, tool] as const);
+  const discovered: ToolDefinition[] = [];
+  const names = new Set<string>();
+
+  for (const [entryName, tool] of entries) {
+    assertToolDefinition(tool, entryName, fromRecord);
+
+    if (names.has(tool.name)) {
+      throw new AppError(
+        `Duplicate discovered tool: ${tool.name}`,
+        "DUPLICATE_DISCOVERED_TOOL",
+        409,
+        {
+          toolName: tool.name,
+          sourceName: options.sourceName ?? "anonymous"
+        }
+      );
+    }
+
+    names.add(tool.name);
+    discovered.push(tool);
+  }
+
+  logger.info("tool discovery completed", {
+    sourceName: options.sourceName ?? "anonymous",
+    sourceType: fromRecord ? "record" : "array",
+    toolCount: discovered.length,
+    toolNames: discovered.map((tool) => tool.name)
+  });
+
+  return discovered;
+}
+
 function validateAgainstSchema(schema: JsonSchema, input: unknown, path = "$"): string[] {
   switch (schema.type) {
     case "string":
@@ -353,6 +423,54 @@ function validateObjectSchema(
 
 function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertToolDefinition(
+  tool: ToolDefinition | undefined,
+  entryName: string,
+  fromRecord: boolean
+): asserts tool is ToolDefinition {
+  if (!tool || typeof tool.name !== "string" || tool.name.trim().length === 0) {
+    throw new AppError("Discovered tool must declare a non-empty name", "INVALID_DISCOVERED_TOOL", 500, {
+      entryName
+    });
+  }
+
+  if (typeof tool.description !== "string" || tool.description.trim().length === 0) {
+    throw new AppError(
+      `Discovered tool ${tool.name} must declare a description`,
+      "INVALID_DISCOVERED_TOOL",
+      500,
+      {
+        entryName,
+        toolName: tool.name
+      }
+    );
+  }
+
+  if (typeof tool.execute !== "function") {
+    throw new AppError(
+      `Discovered tool ${tool.name} must declare an execute function`,
+      "INVALID_DISCOVERED_TOOL",
+      500,
+      {
+        entryName,
+        toolName: tool.name
+      }
+    );
+  }
+
+  if (fromRecord && entryName !== tool.name) {
+    throw new AppError(
+      `Discovered tool entry ${entryName} does not match tool name ${tool.name}`,
+      "DISCOVERED_TOOL_NAME_MISMATCH",
+      500,
+      {
+        entryName,
+        toolName: tool.name
+      }
+    );
+  }
 }
 
 async function runWithTimeout<T>(

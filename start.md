@@ -5,11 +5,12 @@
 
    The API server now loads the root `.env` file automatically during local development.
    The `.env.example` file is only a template; runtime secrets belong in the root `.env`.
+   The root `prepare` script also refreshes Husky Git hooks during install.
 
 2. Start PostgreSQL
    - Preferred local test database:
      - host: `127.0.0.1`
-     - port: `5433`
+     - port: `5432`
      - database: `clusterdata`
      - username: `postgres`
      - password: `aa`
@@ -105,3 +106,7 @@
    - `curl http://127.0.0.1:3001/api/overview`
    - The `requestSecurity` field shows active limits for chat, SQL, metadata search, dataset profiling, and chart inputs.
    - Oversized or invalid inputs return 400 with an `AppError` code such as `CHAT_MESSAGE_TOO_LARGE`, `SQL_TOO_LARGE`, or `DATASET_ROW_LIMIT_EXCEEDED`.
+
+12. Run the shared repository gate
+   - `pnpm verify`
+   - This is the same lint + typecheck + test sequence enforced by the Husky `pre-commit` hook.

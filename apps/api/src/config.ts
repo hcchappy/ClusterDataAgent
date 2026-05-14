@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { DEFAULT_REQUEST_SECURITY_POLICY } from "@clusterdata/security";
+import {
+  DEFAULT_REQUEST_SECURITY_POLICY,
+  DEFAULT_SQL_READ_ACCESS_POLICY,
+  buildSqlReadAccessPolicy,
+  type SqlReadAccessPolicy,
+  type UserRole
+} from "@clusterdata/security";
 import { AppError } from "@clusterdata/shared";
 
 const ConfigSchema = z.object({
@@ -15,6 +21,21 @@ const ConfigSchema = z.object({
   AGENT_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(6),
   AGENT_MEMORY_LIMIT: z.coerce.number().int().positive().default(20),
   AGENT_MEMORY_STORE_PATH: z.string().optional().default(""),
+  SQL_ACCESS_DEFAULT_ROLE: z
+    .enum(["admin", "analyst", "viewer"])
+    .default(DEFAULT_SQL_READ_ACCESS_POLICY.defaultRole),
+  SQL_ADMIN_ALLOWED_TABLES: z.string().default("*"),
+  SQL_ANALYST_ALLOWED_TABLES: z
+    .string()
+    .default(defaultAllowedTablesValue(DEFAULT_SQL_READ_ACCESS_POLICY.roles.analyst.allowedTables)),
+  SQL_VIEWER_ALLOWED_TABLES: z
+    .string()
+    .default(defaultAllowedTablesValue(DEFAULT_SQL_READ_ACCESS_POLICY.roles.viewer.allowedTables)),
+  SQL_ADMIN_BLOCKED_COLUMNS: z.string().default(""),
+  SQL_ANALYST_BLOCKED_COLUMNS: z.string().default(""),
+  SQL_VIEWER_BLOCKED_COLUMNS: z
+    .string()
+    .default(DEFAULT_SQL_READ_ACCESS_POLICY.roles.viewer.blockedColumns.join(",")),
   API_MAX_SESSION_ID_CHARS: z.coerce
     .number()
     .int()
@@ -100,6 +121,7 @@ export interface ApiConfig {
   readonly agentMaxToolCalls: number;
   readonly agentMemoryLimit: number;
   readonly agentMemoryStorePath: string;
+  readonly sqlAccess: SqlReadAccessPolicy;
   readonly requestSecurity: {
     readonly maxSessionIdChars: number;
     readonly maxChatMessageChars: number;
@@ -140,6 +162,23 @@ export function loadApiConfig(env: NodeJS.ProcessEnv): ApiConfig {
     agentMaxToolCalls: parsed.data.AGENT_MAX_TOOL_CALLS,
     agentMemoryLimit: parsed.data.AGENT_MEMORY_LIMIT,
     agentMemoryStorePath: parsed.data.AGENT_MEMORY_STORE_PATH,
+    sqlAccess: buildSqlReadAccessPolicy({
+      defaultRole: parsed.data.SQL_ACCESS_DEFAULT_ROLE as UserRole,
+      roles: {
+        admin: {
+          allowedTables: parseSqlAllowedTables(parsed.data.SQL_ADMIN_ALLOWED_TABLES),
+          blockedColumns: parseSqlPermissionList(parsed.data.SQL_ADMIN_BLOCKED_COLUMNS)
+        },
+        analyst: {
+          allowedTables: parseSqlAllowedTables(parsed.data.SQL_ANALYST_ALLOWED_TABLES),
+          blockedColumns: parseSqlPermissionList(parsed.data.SQL_ANALYST_BLOCKED_COLUMNS)
+        },
+        viewer: {
+          allowedTables: parseSqlAllowedTables(parsed.data.SQL_VIEWER_ALLOWED_TABLES),
+          blockedColumns: parseSqlPermissionList(parsed.data.SQL_VIEWER_BLOCKED_COLUMNS)
+        }
+      }
+    }),
     requestSecurity: {
       maxSessionIdChars: parsed.data.API_MAX_SESSION_ID_CHARS,
       maxChatMessageChars: parsed.data.API_MAX_CHAT_MESSAGE_CHARS,
@@ -157,5 +196,24 @@ export function loadApiConfig(env: NodeJS.ProcessEnv): ApiConfig {
       maxChartRecommendations: parsed.data.API_MAX_CHART_RECOMMENDATIONS
     }
   };
+}
+
+function parseSqlAllowedTables(value: string): "*" | readonly string[] {
+  if (value.trim() === "*") {
+    return "*";
+  }
+
+  return parseSqlPermissionList(value);
+}
+
+function parseSqlPermissionList(value: string): readonly string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function defaultAllowedTablesValue(value: "*" | readonly string[]): string {
+  return value === "*" ? "*" : value.join(",");
 }
 
