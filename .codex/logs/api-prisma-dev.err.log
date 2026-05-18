@@ -1,0 +1,20 @@
+$ tsx watch src/server.ts
+{"timestamp":"2026-05-17T19:40:25.636Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:18:51.539Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:20:06.891Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:20:27.239Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:20:47.281Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:21:07.840Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:21:50.094Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:22:05.351Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:22:12.154Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:22:24.607Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:22:49.686Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:22:56.134Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:23:13.774Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:23:49.912Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:24:38.286Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:26:45.344Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+stgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:24:38.299Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}
+{"timestamp":"2026-05-18T00:26:45.330Z","level":"error","scope":"api-server","message":"Unhandled API bootstrap error","context":{"error":"PostgreSQL metadata scan failed"}}

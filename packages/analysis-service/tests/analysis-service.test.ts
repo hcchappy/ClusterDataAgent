@@ -3,6 +3,7 @@ import { AppError } from "@clusterdata/shared";
 import {
   analyzeTimeSeries,
   detectOutliers,
+  generateDatasetInsights,
   profileDataset,
   summarizeSeries
 } from "../src/index.js";
@@ -180,8 +181,45 @@ describe("analysis-service", () => {
     expect(profile.quality.warnings).toContain("1 duplicate rows detected");
   });
 
+  it("generates quality, trend, breakdown, and correlation insights", () => {
+    const result = generateDatasetInsights({
+      rows: [
+        { createdAt: "2026-01-01T00:00:00.000Z", revenue: 10, cost: 5, region: "north" },
+        { createdAt: "2026-01-02T00:00:00.000Z", revenue: 20, cost: 10, region: "north" },
+        { createdAt: "2026-01-03T00:00:00.000Z", revenue: 40, cost: 20, region: "south" }
+      ]
+    });
+
+    expect(result.profile.rowCount).toBe(3);
+    expect(result.insights).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "trend",
+          fields: ["createdAt", "revenue"]
+        }),
+        expect.objectContaining({
+          kind: "breakdown",
+          fields: ["region", "revenue"]
+        }),
+        expect.objectContaining({
+          kind: "correlation",
+          fields: ["revenue", "cost"]
+        })
+      ])
+    );
+  });
+
   it("rejects empty datasets", () => {
     expect(() => profileDataset({ rows: [] })).toThrow(AppError);
+  });
+
+  it("rejects invalid dataset insight limits", () => {
+    expect(() =>
+      generateDatasetInsights({
+        rows: [{ revenue: 1 }],
+        maxInsights: 0
+      })
+    ).toThrow(AppError);
   });
 
   it("rejects invalid time series windows", () => {

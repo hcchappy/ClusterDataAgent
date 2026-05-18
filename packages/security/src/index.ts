@@ -88,6 +88,9 @@ export interface SqlReadAccessDecision {
 
 export interface RequestSecurityPolicy {
   readonly maxSessionIdChars: number;
+  readonly maxSessionTitleChars: number;
+  readonly maxSessionTags: number;
+  readonly maxSessionTagChars: number;
   readonly maxChatMessageChars: number;
   readonly maxModelChars: number;
   readonly maxSqlChars: number;
@@ -105,6 +108,9 @@ export interface RequestSecurityPolicy {
 
 export const DEFAULT_REQUEST_SECURITY_POLICY: RequestSecurityPolicy = {
   maxSessionIdChars: 128,
+  maxSessionTitleChars: 120,
+  maxSessionTags: 8,
+  maxSessionTagChars: 32,
   maxChatMessageChars: 8_000,
   maxModelChars: 128,
   maxSqlChars: 20_000,
@@ -261,6 +267,49 @@ export function assertAccessRequestInput(
     rejectSecurityInput("Invalid security action", "INVALID_SECURITY_ACTION", {
       allowedActions: ACCESS_ACTIONS
     });
+  }
+}
+
+export function assertSessionIdInput(
+  sessionId: unknown,
+  policy = DEFAULT_REQUEST_SECURITY_POLICY
+): asserts sessionId is string {
+  assertBoundedText(sessionId, "sessionId", policy.maxSessionIdChars, "SESSION_ID_TOO_LARGE");
+}
+
+export function assertSessionMetadataInput(
+  input: {
+    readonly title?: unknown;
+    readonly tags?: unknown;
+  },
+  policy = DEFAULT_REQUEST_SECURITY_POLICY
+): void {
+  if (typeof input.title !== "undefined" && input.title !== null) {
+    assertBoundedText(
+      input.title,
+      "title",
+      policy.maxSessionTitleChars,
+      "SESSION_TITLE_TOO_LARGE"
+    );
+  }
+
+  if (typeof input.tags === "undefined" || input.tags === null) {
+    return;
+  }
+
+  if (!Array.isArray(input.tags)) {
+    rejectSecurityInput("tags must be an array", "INVALID_SESSION_TAGS");
+  }
+
+  if (input.tags.length > policy.maxSessionTags) {
+    rejectSecurityInput("Too many session tags", "SESSION_TAG_LIMIT_EXCEEDED", {
+      count: input.tags.length,
+      limit: policy.maxSessionTags
+    });
+  }
+
+  for (const tag of input.tags) {
+    assertBoundedText(tag, "tag", policy.maxSessionTagChars, "SESSION_TAG_TOO_LARGE");
   }
 }
 

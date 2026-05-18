@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -220,6 +220,97 @@ describe("agent-core", () => {
     ]);
   });
 
+  it("governs large query tool outputs before returning them to the model loop", async () => {
+    const registry = new ToolRegistry();
+
+    registry.register({
+      name: "query-sql",
+      description: "Execute a read-only query",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sql: { type: "string" }
+        },
+        required: ["sql"],
+        additionalProperties: false
+      },
+      execute: () => ({
+        columns: ["id", "name"],
+        rows: Array.from({ length: 80 }, (_unused, index) => ({
+          id: `tenant-${index + 1}`,
+          name: `Tenant ${index + 1}`
+        })),
+        rowCount: 80,
+        durationMs: 12,
+        validation: {
+          allowed: true,
+          normalizedSql: "select id, name from Tenant limit 80",
+          referencedTables: ["Tenant"],
+          referencedColumns: ["id", "name"],
+          limit: 80
+        }
+      })
+    });
+
+    const executor = new AgentExecutor({
+      toolRegistry: registry,
+      sessionStore: new InMemorySessionStore(4),
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0,
+        maxToolResultChars: 800
+      },
+      transport: createTransport([
+        {
+          id: "resp_tool_large",
+          output: [
+            {
+              type: "function_call",
+              call_id: "call_query_1",
+              name: "query-sql",
+              arguments: "{\"sql\":\"select id, name from Tenant limit 80\"}"
+            }
+          ]
+        },
+        {
+          id: "resp_done_large",
+          output_text: "Loaded a preview",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Loaded a preview" }]
+            }
+          ]
+        }
+      ])
+    });
+
+    const result = await executor.executeTurn({
+      sessionId: "large-query-session",
+      message: "Show me tenants"
+    });
+
+    expect(result.toolCalls).toEqual([
+      {
+        callId: "call_query_1",
+        toolName: "query-sql",
+        arguments: {
+          sql: "select id, name from Tenant limit 80"
+        },
+        output: expect.objectContaining({
+          rowCount: 80,
+          previewRowCount: expect.any(Number),
+          truncated: true
+        })
+      }
+    ]);
+  });
+
   it("retries transport failures and succeeds on the second attempt", async () => {
     const registry = new ToolRegistry();
     const sessionStore = new InMemorySessionStore(4);
@@ -402,6 +493,323 @@ describe("agent-core", () => {
       { role: "user", content: "second" },
       { role: "assistant", content: "two" }
     ]);
+
+    cleanupTempSessionStore(filePath);
+  });
+
+  it("lists session summaries from the in-memory session store", () => {
+    const sessionStore = new InMemorySessionStore(4);
+
+    sessionStore.append("beta", [
+      { role: "user", content: "second" },
+      { role: "assistant", content: "answer two" }
+    ]);
+    sessionStore.append("alpha", [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "answer one" }
+    ]);
+
+    expect(sessionStore.list()).toEqual([
+      {
+        sessionId: "alpha",
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String),
+        messageCount: 2,
+        lastMessage: {
+          role: "assistant",
+          content: "answer one"
+        }
+      },
+      {
+        sessionId: "beta",
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String),
+        messageCount: 2,
+        lastMessage: {
+          role: "assistant",
+          content: "answer two"
+        }
+      }
+    ]);
+  });
+
+  it("deletes and clears in-memory session history", () => {
+    const sessionStore = new InMemorySessionStore(4);
+
+    sessionStore.append("alpha", [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "answer one" }
+    ]);
+    sessionStore.append("beta", [
+      { role: "user", content: "second" }
+    ]);
+
+    expect(sessionStore.delete("alpha")).toBe(true);
+    expect(sessionStore.get("alpha")).toEqual([]);
+    expect(sessionStore.delete("missing")).toBe(false);
+    expect(sessionStore.clear()).toBe(1);
+    expect(sessionStore.list()).toEqual([]);
+  });
+
+  it("lists and deletes persisted file-backed sessions", () => {
+    const filePath = createTempSessionStorePath();
+    const sessionStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+
+    sessionStore.append("persisted-a", [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "answer one" }
+    ]);
+    sessionStore.append("persisted-b", [
+      { role: "user", content: "second" }
+    ]);
+
+    const storedSessions = sessionStore.list();
+
+    expect(storedSessions).toHaveLength(2);
+    expect(storedSessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: "persisted-a",
+          createdAt: expect.any(String),
+          updatedAt: expect.any(String),
+          messageCount: 2,
+          lastMessage: {
+            role: "assistant",
+            content: "answer one"
+          }
+        }),
+        expect.objectContaining({
+          sessionId: "persisted-b",
+          createdAt: expect.any(String),
+          updatedAt: expect.any(String),
+          messageCount: 1,
+          lastMessage: {
+            role: "user",
+            content: "second"
+          }
+        })
+      ])
+    );
+    expect(
+      storedSessions[0]!.updatedAt.localeCompare(storedSessions[1]!.updatedAt)
+    ).toBeGreaterThanOrEqual(0);
+    expect(sessionStore.delete("persisted-a")).toBe(true);
+
+    const reloadedStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+
+    expect(reloadedStore.list()).toEqual([
+      {
+        sessionId: "persisted-b",
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String),
+        messageCount: 1,
+        lastMessage: {
+          role: "user",
+          content: "second"
+        }
+      }
+    ]);
+
+    cleanupTempSessionStore(filePath);
+  });
+
+  it("reads full session records with timestamps", () => {
+    const sessionStore = new InMemorySessionStore(4);
+
+    sessionStore.append("alpha", [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "answer one" }
+    ]);
+
+    expect(sessionStore.read("alpha")).toEqual({
+      sessionId: "alpha",
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+      messageCount: 2,
+      lastMessage: {
+        role: "assistant",
+        content: "answer one"
+      },
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "answer one" }
+      ]
+    });
+    expect(sessionStore.read("missing")).toBeUndefined();
+  });
+
+  it("updates session metadata in memory", () => {
+    const sessionStore = new InMemorySessionStore(4);
+
+    sessionStore.append("alpha", [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "answer one" }
+    ]);
+
+    const updated = sessionStore.updateMetadata("alpha", {
+      title: "Revenue Review",
+      tags: ["finance", "q2", "finance"]
+    });
+
+    expect(updated).toEqual({
+      sessionId: "alpha",
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+      messageCount: 2,
+      title: "Revenue Review",
+      tags: ["finance", "q2"],
+      lastMessage: {
+        role: "assistant",
+        content: "answer one"
+      },
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "answer one" }
+      ]
+    });
+    expect(sessionStore.list()[0]).toMatchObject({
+      sessionId: "alpha",
+      title: "Revenue Review",
+      tags: ["finance", "q2"]
+    });
+  });
+
+  it("forks persisted sessions with copied metadata and history", () => {
+    const filePath = createTempSessionStorePath();
+    const sessionStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+
+    sessionStore.append("source-session", [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" }
+    ]);
+    sessionStore.updateMetadata("source-session", {
+      title: "North Region Review",
+      tags: ["north", "ops"]
+    });
+
+    const forked = sessionStore.fork("source-session", "fork-session");
+    const reloadedStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+
+    expect(forked).toMatchObject({
+      sessionId: "fork-session",
+      title: "North Region Review (fork)",
+      tags: ["north", "ops"],
+      forkedFromSessionId: "source-session",
+      messageCount: 2
+    });
+    expect(reloadedStore.read("fork-session")).toMatchObject({
+      sessionId: "fork-session",
+      title: "North Region Review (fork)",
+      tags: ["north", "ops"],
+      forkedFromSessionId: "source-session",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi there" }
+      ]
+    });
+
+    cleanupTempSessionStore(filePath);
+  });
+
+  it("upgrades version 1 persisted session files to version 2 records", () => {
+    const filePath = createTempSessionStorePath();
+
+    writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          version: 1,
+          sessions: {
+            legacy: [
+              { role: "user", content: "hello" },
+              { role: "assistant", content: "world" }
+            ]
+          }
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    const sessionStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+    const session = sessionStore.read("legacy");
+
+    expect(session).toEqual({
+      sessionId: "legacy",
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+      messageCount: 2,
+      lastMessage: {
+        role: "assistant",
+        content: "world"
+      },
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "world" }
+      ]
+    });
+
+    sessionStore.append("legacy", [
+      { role: "user", content: "again" },
+      { role: "assistant", content: "done" }
+    ]);
+
+    expect(JSON.parse(readFileSync(filePath, "utf8"))).toEqual({
+      version: 2,
+      sessions: {
+        legacy: {
+          createdAt: expect.any(String),
+          updatedAt: expect.any(String),
+          messages: [
+            { role: "user", content: "hello" },
+            { role: "assistant", content: "world" },
+            { role: "user", content: "again" },
+            { role: "assistant", content: "done" }
+          ]
+        }
+      }
+    });
+
+    cleanupTempSessionStore(filePath);
+  });
+
+  it("clears persisted file-backed sessions and writes the empty state to disk", () => {
+    const filePath = createTempSessionStorePath();
+    const sessionStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+
+    sessionStore.append("persisted", [
+      { role: "user", content: "Remember me" },
+      { role: "assistant", content: "I did" }
+    ]);
+
+    expect(sessionStore.clear()).toBe(1);
+
+    const reloadedStore = new FileSessionStore({
+      filePath,
+      maxMessages: 4
+    });
+
+    expect(reloadedStore.list()).toEqual([]);
+    expect(reloadedStore.get("persisted")).toEqual([]);
 
     cleanupTempSessionStore(filePath);
   });
@@ -741,6 +1149,74 @@ describe("agent-core", () => {
     expect(streamResponse).toHaveBeenCalledTimes(1);
   });
 
+  it("stops streaming turns when the caller aborts the request", async () => {
+    const sessionStore = new InMemorySessionStore();
+    const controller = new AbortController();
+    const streamResponse = vi.fn(async function* (request) {
+      yield {
+        type: "response.output_text.delta",
+        delta: "partial"
+      };
+
+      if (request.signal?.aborted) {
+        throw new AppError("Agent request was aborted", "AGENT_REQUEST_ABORTED", 499);
+      }
+
+      yield {
+        type: "response.output_text.delta",
+        delta: "late"
+      };
+    });
+    const executor = new AgentExecutor({
+      toolRegistry: new ToolRegistry(),
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: {
+        createResponse: vi.fn(async () => {
+          throw new Error("createResponse should not be used when streamResponse is available");
+        }),
+        streamResponse
+      }
+    });
+    const events: string[] = [];
+    let partialText = "";
+
+    await expect(
+      (async () => {
+        for await (const event of executor.streamTurn({
+          sessionId: "stream-aborted",
+          message: "Hi",
+          signal: controller.signal
+        })) {
+          events.push(event.type);
+
+          if (event.type === "response.output_text.delta") {
+            partialText += event.delta;
+            controller.abort();
+          }
+        }
+      })()
+    ).rejects.toMatchObject({
+      code: "AGENT_REQUEST_ABORTED"
+    });
+
+    expect(events).toEqual([
+      "session.started",
+      "response.output_text.delta",
+      "response.failed"
+    ]);
+    expect(partialText).toBe("partial");
+    expect(sessionStore.get("stream-aborted")).toEqual([]);
+    expect(streamResponse).toHaveBeenCalledTimes(1);
+  });
+
   it("completes streams from text deltas when no final response payload is sent", async () => {
     const sessionStore = new InMemorySessionStore();
     const streamResponse = vi.fn(async function* () {
@@ -887,6 +1363,258 @@ describe("agent-core", () => {
     expect(
       resolveResponsesApiEndpoint("https://openrouter.ai/api/v1/responses")
     ).toBe("https://openrouter.ai/api/v1/responses");
+  });
+
+  it("captures completed turn observability with tool traces", async () => {
+    const registry = new ToolRegistry();
+
+    registry.register({
+      name: "validate-sql",
+      description: "validates a SQL statement",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sql: { type: "string" }
+        },
+        required: ["sql"],
+        additionalProperties: false
+      },
+      execute: ({ sql }: { sql: string }) => ({
+        allowed: true,
+        normalizedSql: sql
+      })
+    });
+
+    const executor = new AgentExecutor({
+      toolRegistry: registry,
+      sessionStore: new InMemorySessionStore(4),
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: createTransport([
+        {
+          id: "resp_observe_tool",
+          output: [
+            {
+              type: "function_call",
+              call_id: "call_observe_1",
+              name: "validate-sql",
+              arguments: "{\"sql\":\"select 1\"}"
+            }
+          ]
+        },
+        {
+          id: "resp_observe_final",
+          output_text: "The query is safe.",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "The query is safe." }]
+            }
+          ]
+        }
+      ])
+    });
+
+    await executor.executeTurn({
+      sessionId: "observe-success",
+      message: "Can I run select 1?"
+    });
+
+    const snapshot = executor.getObservabilitySnapshot();
+
+    expect(snapshot.summary).toMatchObject({
+      totalTurns: 1,
+      completedTurns: 1,
+      failedTurns: 0,
+      totalToolCalls: 1
+    });
+    expect(snapshot.summary.tools["validate-sql"]).toMatchObject({
+      calls: 1,
+      successes: 1,
+      failures: 0
+    });
+    expect(snapshot.recentTurns[0]).toMatchObject({
+      sessionId: "observe-success",
+      status: "completed",
+      modelResponseCount: 2,
+      outputText: "The query is safe."
+    });
+    expect(snapshot.recentTurns[0]?.toolCalls[0]).toMatchObject({
+      callId: "call_observe_1",
+      toolName: "validate-sql",
+      status: "completed"
+    });
+  });
+
+  it("captures failed turn observability", async () => {
+    const executor = new AgentExecutor({
+      toolRegistry: new ToolRegistry(),
+      sessionStore: new InMemorySessionStore(4),
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: {
+        createResponse: async () => {
+          throw new AppError("upstream unavailable", "OPENAI_REQUEST_FAILED", 502);
+        }
+      }
+    });
+
+    await expect(
+      executor.executeTurn({
+        sessionId: "observe-failure",
+        message: "Hi"
+      })
+    ).rejects.toMatchObject({
+      code: "OPENAI_REQUEST_FAILED"
+    });
+
+    const snapshot = executor.getObservabilitySnapshot();
+
+    expect(snapshot.summary).toMatchObject({
+      totalTurns: 1,
+      completedTurns: 0,
+      failedTurns: 1,
+      totalToolCalls: 0
+    });
+    expect(snapshot.recentTurns[0]).toMatchObject({
+      sessionId: "observe-failure",
+      status: "failed",
+      error: {
+        code: "OPENAI_REQUEST_FAILED"
+      }
+    });
+  });
+
+  it("runs evaluation suites with pass and fail results", async () => {
+    const registry = new ToolRegistry();
+    const sessionStore = new InMemorySessionStore(8);
+
+    registry.register({
+      name: "validate-sql",
+      description: "validates a SQL statement",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sql: { type: "string" }
+        },
+        required: ["sql"],
+        additionalProperties: false
+      },
+      execute: ({ sql }: { sql: string }) => ({
+        allowed: true,
+        normalizedSql: sql
+      })
+    });
+
+    const executor = new AgentExecutor({
+      toolRegistry: registry,
+      sessionStore,
+      config: {
+        apiKey: "test-key",
+        apiEndpoint: "https://api.openai.com/v1",
+        defaultModel: "gpt-test",
+        requestTimeoutMs: 1000,
+        maxToolCalls: 4,
+        maxRetries: 0
+      },
+      transport: createTransport([
+        {
+          id: "resp_eval_tool",
+          output: [
+            {
+              type: "function_call",
+              call_id: "call_eval_1",
+              name: "validate-sql",
+              arguments: "{\"sql\":\"select 1\"}"
+            }
+          ]
+        },
+        {
+          id: "resp_eval_final",
+          output_text: "The query is safe.",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "The query is safe." }]
+            }
+          ]
+        },
+        {
+          id: "resp_eval_plain",
+          output_text: "Hello there",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Hello there" }]
+            }
+          ]
+        }
+      ])
+    });
+
+    const report = await executor.runEvaluationSuite({
+      name: "smoke",
+      cases: [
+        {
+          id: "sql-safety",
+          message: "Can I run select 1?",
+          expected: {
+            requiredToolNames: ["validate-sql"],
+            outputIncludes: ["safe"],
+            minToolCalls: 1
+          }
+        },
+        {
+          id: "missing-tool",
+          message: "Say hi",
+          expected: {
+            requiredToolNames: ["validate-sql"]
+          }
+        }
+      ]
+    });
+
+    expect(report).toMatchObject({
+      name: "smoke",
+      totalCases: 2,
+      passedCases: 1,
+      failedCases: 1
+    });
+    expect(report.results[0]).toMatchObject({
+      caseId: "sql-safety",
+      passed: true,
+      toolNames: ["validate-sql"]
+    });
+    expect(report.results[1]).toMatchObject({
+      caseId: "missing-tool",
+      passed: false,
+      toolNames: []
+    });
+    expect(report.results[1]?.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "tool.required:validate-sql",
+          passed: false
+        })
+      ])
+    );
+    expect(sessionStore.list()).toEqual([]);
+    expect(executor.getObservabilitySnapshot().summary.totalTurns).toBe(2);
   });
 });
 

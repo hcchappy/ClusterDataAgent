@@ -3,14 +3,21 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  buildMetadataCatalogInsights,
+  buildSemanticCatalogInsights,
+  buildSemanticMetricQuery,
   InMemoryMetadataCache,
+  InMemorySemanticCatalogCache,
   PrismaMetadataCatalogService,
+  SemanticCatalogService,
   buildPostgresCatalog,
   buildRelationGraph,
   loadPostgresSchemaCatalog,
   loadPrismaSchemaCatalog,
+  loadSemanticCatalog,
   parsePrismaSchema,
   searchMetadataCatalog,
+  searchSemanticCatalog,
   type PostgresColumnRow,
   type PostgresMetadataClient,
   type PostgresQueryRow,
@@ -22,6 +29,10 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 const schemaPath = resolve(
   currentDir,
   "../../../packages/database/prisma/schema.prisma"
+);
+const semanticCatalogPath = resolve(
+  currentDir,
+  "../../../packages/database/semantic/catalog.json"
 );
 
 describe("metadata-engine", () => {
@@ -131,6 +142,30 @@ describe("metadata-engine", () => {
     expect(() => searchMetadataCatalog(catalog, " ")).toThrow("metadata search query is required");
   });
 
+  it("builds metadata catalog insights for workbench exploration", async () => {
+    const catalog = await loadPrismaSchemaCatalog(schemaPath);
+    const insights = buildMetadataCatalogInsights(catalog, {
+      tableLimit: 2,
+      columnLimit: 2
+    });
+
+    expect(insights.summary).toEqual(catalog.summary);
+    expect(insights.dataTypes.length).toBeGreaterThan(0);
+    expect(insights.tables).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tableName: "AuditLog",
+          relationCount: 1,
+          starterQuery: "select id, tenantId from AuditLog limit 20"
+        }),
+        expect.objectContaining({
+          tableName: "Tenant",
+          relationCount: 1
+        })
+      ])
+    );
+  });
+
   it("refreshes the catalog through the prisma catalog service", async () => {
     const service = new PrismaMetadataCatalogService({
       sourcePath: schemaPath
@@ -183,6 +218,123 @@ describe("metadata-engine", () => {
     expect(client.queries).toHaveLength(2);
     expect(catalog.summary.tableCount).toBe(2);
     expect(catalog.relations).toHaveLength(1);
+  });
+
+  it("loads and caches the semantic catalog against the prisma metadata catalog", async () => {
+    const metadataCatalog = await loadPrismaSchemaCatalog(schemaPath);
+    const cache = new InMemorySemanticCatalogCache();
+    const first = await loadSemanticCatalog(semanticCatalogPath, metadataCatalog, cache);
+    const second = await loadSemanticCatalog(semanticCatalogPath, metadataCatalog, cache);
+
+    expect(first.summary).toEqual({
+      modelCount: 2,
+      metricCount: 3,
+      dimensionCount: 7,
+      ownerCount: 2
+    });
+    expect(first.metrics.map((metric) => metric.id)).toContain("tenant_count");
+    expect(second).toBe(first);
+  });
+
+  it("searches the semantic catalog across models dimensions and metrics", async () => {
+    const metadataCatalog = await loadPrismaSchemaCatalog(schemaPath);
+    const catalog = await loadSemanticCatalog(semanticCatalogPath, metadataCatalog);
+    const metricResults = searchSemanticCatalog(catalog, "租户数", 5);
+    const dimensionResults = searchSemanticCatalog(catalog, "action", 5);
+
+    expect(metricResults[0]).toMatchObject({
+      type: "metric",
+      id: "tenant_count",
+      modelId: "tenant"
+    });
+    expect(dimensionResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "dimension",
+          id: "auditLog.action",
+          tableName: "AuditLog"
+        })
+      ])
+    );
+  });
+
+  it("builds semantic metric sql with dimensions and time grain", async () => {
+    const metadataCatalog = await loadPrismaSchemaCatalog(schemaPath);
+    const catalog = await loadSemanticCatalog(semanticCatalogPath, metadataCatalog);
+    const query = buildSemanticMetricQuery(catalog, {
+      metricIds: ["audit_log_count"],
+      dimensionIds: ["auditLog.action"],
+      timeGrain: "day",
+      limit: 30
+    });
+
+    expect(query.metricIds).toEqual(["audit_log_count"]);
+    expect(query.dimensionIds).toEqual(["auditLog.action", "auditLog.createdAt"]);
+    expect(query.sql).toContain(`date_trunc('day', "createdAt") as "auditLog_createdAt_day"`);
+    expect(query.sql).toContain(`count("id") as "audit_log_count"`);
+    expect(query.sql).toContain('from "AuditLog"');
+    expect(query.sql).toContain('group by "action", date_trunc(\'day\', "createdAt")');
+    expect(query.referencedColumns).toEqual(
+      expect.arrayContaining(["AuditLog.id", "AuditLog.action", "AuditLog.createdAt"])
+    );
+  });
+
+  it("builds semantic insights for workbench exploration", async () => {
+    const metadataCatalog = await loadPrismaSchemaCatalog(schemaPath);
+    const catalog = await loadSemanticCatalog(semanticCatalogPath, metadataCatalog);
+    const insights = buildSemanticCatalogInsights(catalog, {
+      modelLimit: 2,
+      metricLimit: 2
+    });
+
+    expect(insights.summary).toEqual(catalog.summary);
+    expect(insights.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          modelId: "auditLog",
+          metricCount: 2
+        }),
+        expect.objectContaining({
+          modelId: "tenant",
+          metricCount: 1
+        })
+      ])
+    );
+    expect(insights.owners).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          owner: "platform",
+          modelCount: 1,
+          metricCount: 1
+        })
+      ])
+    );
+  });
+
+  it("queries semantic data through the semantic catalog service", async () => {
+    const metadataCatalog = await loadPrismaSchemaCatalog(schemaPath);
+    const semanticService = new SemanticCatalogService({
+      sourcePath: semanticCatalogPath,
+      getMetadataCatalog: () => metadataCatalog,
+      initialCatalog: await loadSemanticCatalog(semanticCatalogPath, metadataCatalog)
+    });
+    const searchResults = await semanticService.search("audit", 5);
+    const query = await semanticService.buildMetricQuery({
+      metricIds: ["tenant_count"],
+      dimensionIds: ["tenant.name"],
+      limit: 10
+    });
+
+    expect(searchResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "model",
+          id: "auditLog"
+        })
+      ])
+    );
+    expect(query.sql).toContain('select "name" as "tenant_name"');
+    expect(query.sql).toContain('count("id") as "tenant_count"');
   });
 });
 

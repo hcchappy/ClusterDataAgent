@@ -30,6 +30,21 @@ export class AppError extends Error {
   }
 }
 
+export interface SerializedAppError {
+  readonly message: string;
+  readonly code: string;
+  readonly statusCode: number;
+  readonly details?: LogContext;
+  readonly requestId?: string;
+}
+
+export interface ErrorResponseBody {
+  readonly ok: false;
+  readonly message: string;
+  readonly code: string;
+  readonly error: SerializedAppError;
+}
+
 export function safeErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -40,6 +55,38 @@ export function safeErrorMessage(error: unknown): string {
   }
 
   return "Unexpected error";
+}
+
+export function serializeAppError(
+  error: unknown,
+  requestId?: string
+): SerializedAppError {
+  const appError =
+    error instanceof AppError
+      ? error
+      : new AppError("Internal error", "INTERNAL_ERROR", 500);
+
+  return {
+    message: appError.message,
+    code: appError.code,
+    statusCode: appError.statusCode,
+    ...(appError.details ? { details: appError.details } : {}),
+    ...(requestId ? { requestId } : {})
+  };
+}
+
+export function buildErrorResponse(
+  error: unknown,
+  requestId?: string
+): ErrorResponseBody {
+  const serialized = serializeAppError(error, requestId);
+
+  return {
+    ok: false,
+    message: serialized.message,
+    code: serialized.code,
+    error: serialized
+  };
 }
 
 export function formatLogEntry(
@@ -91,4 +138,3 @@ export function nonEmptyList<T>(items: readonly T[]): readonly T[] {
 
   return items;
 }
-

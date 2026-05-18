@@ -1,9 +1,10 @@
-import type { SqlQueryResult, SqlValidationResult } from "./api.js";
+import type { SqlQueryResult, SqlValidationResult, UserRole } from "./api.js";
 
 export interface SqlHistoryEntry {
   readonly id: string;
   readonly sql: string;
   readonly executedAt: string;
+  readonly role?: UserRole;
   readonly result: SqlQueryResult;
 }
 
@@ -16,12 +17,14 @@ export function createSqlHistoryEntry(
   options: {
     readonly id?: string;
     readonly executedAt?: string;
+    readonly role?: UserRole;
   } = {}
 ): SqlHistoryEntry {
   return {
     id: options.id ?? createHistoryEntryId(),
     sql: sql.trim(),
     executedAt: options.executedAt ?? new Date().toISOString(),
+    role: options.role,
     result
   };
 }
@@ -151,6 +154,7 @@ function isSqlHistoryEntry(value: unknown): value is SqlHistoryEntry {
     typeof value.id === "string" &&
     typeof value.sql === "string" &&
     typeof value.executedAt === "string" &&
+    (typeof value.role === "undefined" || isUserRole(value.role)) &&
     isSqlQueryResult(value.result)
   );
 }
@@ -185,4 +189,8 @@ function isSqlValidationResult(value: unknown): value is SqlValidationResult {
 
 function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUserRole(value: unknown): value is UserRole {
+  return value === "admin" || value === "analyst" || value === "viewer";
 }

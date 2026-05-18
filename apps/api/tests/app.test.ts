@@ -7,8 +7,11 @@ import { ToolRegistry } from "@clusterdata/tool-system";
 import { type ReadOnlyQueryExecutor } from "@clusterdata/database";
 import { buildSqlReadAccessPolicy } from "@clusterdata/security";
 import {
+  buildSemanticCatalogFromMetadata,
   PrismaMetadataCatalogService,
-  type PrismaSchemaCatalog
+  type PrismaSchemaCatalog,
+  type SemanticCatalog,
+  type SemanticMetricQueryRequest
 } from "@clusterdata/metadata-engine";
 import {
   AgentExecutor,
@@ -167,6 +170,10 @@ describe("api", () => {
       tableCount: 2,
       relationCount: 1
     });
+    expect(payload.semantic).toMatchObject({
+      modelCount: 2,
+      metricCount: 3
+    });
     expect(payload.relations).toContainEqual({
       fromTable: "AuditLog",
       fromColumn: "tenantId",
@@ -176,6 +183,212 @@ describe("api", () => {
     expect(payload.tools.map((tool: { name: string }) => tool.name)).toContain(
       "generate-sql"
     );
+    expect(payload.toolGovernance).toMatchObject({
+      allowedTools: [],
+      blockedTools: [],
+      maxToolResultChars: 12000
+    });
+
+    await app.close();
+  });
+
+  it("returns metadata insights for workbench exploration", async () => {
+    const app = await buildApi({
+      metadataCatalog: createCatalogWithTables([
+        {
+          name: "customers",
+          columns: [
+            { name: "id", dataType: "integer" },
+            { name: "name", dataType: "text" }
+          ]
+        },
+        {
+          name: "orders",
+          columns: [
+            { name: "id", dataType: "integer" },
+            { name: "customer_id", dataType: "integer" },
+            { name: "amount", dataType: "numeric" }
+          ]
+        }
+      ])
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/metadata/insights?limit=2"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(
+      expect.objectContaining({
+        ok: true,
+        insights: expect.objectContaining({
+          tables: expect.arrayContaining([
+            expect.objectContaining({
+              tableName: "orders",
+              starterQuery: "select id, customer_id, amount from orders limit 20"
+            })
+          ])
+        })
+      })
+    );
+
+    await app.close();
+  });
+
+  it("returns semantic insights for workbench exploration", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/semantic/insights?modelLimit=2&metricLimit=2"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(
+      expect.objectContaining({
+        ok: true,
+        insights: expect.objectContaining({
+          summary: expect.objectContaining({
+            modelCount: 2,
+            metricCount: 3
+          }),
+          metrics: expect.arrayContaining([
+            expect.objectContaining({
+              metricId: "audit_log_count"
+            })
+          ])
+        })
+      })
+    );
+
+    await app.close();
+  });
+
+  it("searches semantic metrics and dimensions from the runtime catalog", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/semantic/search?q=%E7%A7%9F%E6%88%B7%E6%95%B0&limit=5"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "metric",
+          id: "tenant_count"
+        })
+      ])
+    );
+
+    await app.close();
+  });
+
+  it("generates semantic sql from metrics and time grain", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/semantic/sql",
+      payload: {
+        metricIds: ["audit_log_count"],
+        dimensionIds: ["auditLog.action"],
+        timeGrain: "day",
+        limit: 20
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      query: {
+        metricIds: ["audit_log_count"],
+        dimensionIds: ["auditLog.action", "auditLog.createdAt"],
+        limit: 20
+      }
+    });
+    expect(response.json().sql).toContain(`date_trunc('day', "createdAt")`);
+    expect(response.json().sql).toContain('from "AuditLog"');
+
+    await app.close();
+  });
+
+  it("executes semantic metric queries through the API", async () => {
+    const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const app = await buildApi({
+      queryExecutor: createQueryExecutor({
+        columns: ["tenant_name", "tenant_count"],
+        rows: [{ tenant_name: "Tenant A", tenant_count: 1 }],
+        rowCount: 1,
+        durationMs: 9
+      })
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/semantic/query",
+      payload: {
+        metricIds: ["tenant_count"],
+        dimensionIds: ["tenant.name"],
+        limit: 10
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      query: {
+        metricIds: ["tenant_count"],
+        dimensionIds: ["tenant.name"],
+        limit: 10
+      },
+      columns: ["tenant_name", "tenant_count"],
+      rowCount: 1,
+      durationMs: 9
+    });
+
+    const auditEntry = infoSpy.mock.calls
+      .map((call) => String(call[0]))
+      .map(
+        (entry) =>
+          JSON.parse(entry) as {
+            scope: string;
+            context?: {
+              action?: string;
+              status?: string;
+            };
+          }
+      )
+      .find(
+        (entry) =>
+          entry.scope === "security.audit" && entry.context?.action === "semantic.query"
+      );
+
+    expect(auditEntry?.context).toMatchObject({
+      action: "semantic.query",
+      status: "completed"
+    });
+
+    await app.close();
+  });
+
+  it("returns readiness and runtime information", async () => {
+    const app = await buildApi();
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      ready: true,
+      checks: {
+        metadataLoaded: true,
+        semanticLoaded: true,
+        sessionStoreReady: true,
+        toolsRegistered: true
+      },
+      runtime: {
+        startedAt: expect.any(String),
+        totalRequests: expect.any(Number),
+        lastMetadataRefreshAt: expect.any(String)
+      }
+    });
 
     await app.close();
   });
@@ -603,6 +816,53 @@ describe("api", () => {
     ]);
   });
 
+  it("exposes semantic search and metric sql generation as agent tools", async () => {
+    const catalog = createCatalogWithTables([
+      {
+        name: "Tenant",
+        columns: [
+          { name: "id", dataType: "String" },
+          { name: "name", dataType: "String" },
+          { name: "createdAt", dataType: "DateTime" }
+        ]
+      }
+    ]);
+    const semanticCatalog = createSemanticCatalog(catalog);
+    const toolRegistry = buildToolRegistry(() => catalog, undefined, {}, {}, () => semanticCatalog);
+    const searchResult = await toolRegistry.execute<{
+      query: string;
+      limit: number;
+    }, {
+      results: readonly { id: string; type: string }[];
+    }>("search-semantics", {
+      query: "Tenant Count",
+      limit: 5
+    });
+    const queryResult = await toolRegistry.execute<SemanticMetricQueryRequest, {
+      sql: string;
+      metricIds: readonly string[];
+      dimensionIds: readonly string[];
+    }>("generate-metric-sql", {
+      metricIds: ["tenant_count"],
+      dimensionIds: ["tenant.name"],
+      limit: 10
+    });
+
+    expect(toolRegistry.list().map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["search-semantics", "generate-metric-sql"])
+    );
+    expect(searchResult.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "metric"
+        })
+      ])
+    );
+    expect(queryResult.metricIds).toEqual(["tenant_count"]);
+    expect(queryResult.dimensionIds).toEqual(["tenant.name"]);
+    expect(queryResult.sql).toContain('count("id") as "tenant_count"');
+  });
+
   it("registers API built-in tools through the discovery flow", () => {
     const catalog = createCatalogWithTables([
       {
@@ -620,11 +880,17 @@ describe("api", () => {
         rows: [{ id: "tenant-a", name: "Tenant A" }],
         rowCount: 1,
         durationMs: 5
-      })
+      }),
+      {},
+      {},
+      () => createSemanticCatalog(catalog)
     );
 
     expect(toolRegistry.list().map((tool) => tool.name)).toEqual([
       "search-metadata",
+      "search-semantics",
+      "generate-metric-sql",
+      "query-metric",
       "validate-sql",
       "generate-sql",
       "query-sql",
@@ -739,6 +1005,690 @@ describe("api", () => {
       ok: true,
       sessionId: "session-1",
       outputText: "Hello from agent"
+    });
+
+    await app.close();
+  });
+
+  it("returns dataset insights through the API", async () => {
+    const app = await buildApi();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/analysis/insights",
+      payload: {
+        rows: [
+          {
+            createdAt: "2026-01-01T00:00:00.000Z",
+            revenue: 10,
+            cost: 5,
+            region: "north"
+          },
+          {
+            createdAt: "2026-01-02T00:00:00.000Z",
+            revenue: 20,
+            cost: 10,
+            region: "north"
+          },
+          {
+            createdAt: "2026-01-03T00:00:00.000Z",
+            revenue: 40,
+            cost: 20,
+            region: "south"
+          }
+        ]
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      profile: {
+        rowCount: 3,
+        fieldCount: 4
+      },
+      insights: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "trend",
+          fields: ["createdAt", "revenue"]
+        }),
+        expect.objectContaining({
+          kind: "breakdown",
+          fields: ["region", "revenue"]
+        }),
+        expect.objectContaining({
+          kind: "correlation",
+          fields: ["revenue", "cost"]
+        })
+      ])
+    });
+
+    await app.close();
+  });
+
+  it("lists stored agent sessions and includes a session count in the overview", async () => {
+    const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-a", [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" }
+    ]);
+    sessionStore.append("session-b", [
+      { role: "user", content: "count orders" }
+    ]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const overviewResponse = await app.inject({
+      method: "GET",
+      url: "/api/overview"
+    });
+    const sessionsResponse = await app.inject({
+      method: "GET",
+      url: "/api/agent/sessions",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(overviewResponse.statusCode).toBe(200);
+    expect(overviewResponse.json().agent).toMatchObject({
+      sessionCount: 2
+    });
+    expect(sessionsResponse.statusCode).toBe(200);
+    expect(sessionsResponse.json()).toMatchObject({
+      ok: true,
+      sessions: expect.arrayContaining([
+        {
+          sessionId: "session-a",
+          createdAt: expect.any(String),
+          updatedAt: expect.any(String),
+          messageCount: 2,
+          lastMessage: {
+            role: "assistant",
+            content: "hi there"
+          }
+        },
+        {
+          sessionId: "session-b",
+          createdAt: expect.any(String),
+          updatedAt: expect.any(String),
+          messageCount: 1,
+          lastMessage: {
+            role: "user",
+            content: "count orders"
+          }
+        }
+      ])
+    });
+
+    const auditEntry = infoSpy.mock.calls
+      .map((call) => String(call[0]))
+      .map(
+        (entry) =>
+          JSON.parse(entry) as {
+            scope: string;
+            context?: {
+              action?: string;
+              status?: string;
+              details?: { sessionCount?: number };
+            };
+          }
+      )
+      .find(
+        (entry) =>
+          entry.scope === "security.audit" &&
+          entry.context?.action === "agent.sessions.list"
+      );
+
+    expect(auditEntry?.context).toMatchObject({
+      action: "agent.sessions.list",
+      status: "completed",
+      details: {
+        sessionCount: 2
+      }
+    });
+
+    await app.close();
+  });
+
+  it("returns one stored agent session by id", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-detail", [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" }
+    ]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agent/sessions/session-detail",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      ok: true,
+      session: {
+        sessionId: "session-detail",
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String),
+        messageCount: 2,
+        lastMessage: {
+          role: "assistant",
+          content: "hi there"
+        },
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "hi there" }
+        ]
+      }
+    });
+
+    await app.close();
+  });
+
+  it("updates stored agent session metadata", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-detail", [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" }
+    ]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/agent/sessions/session-detail",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      },
+      payload: {
+        title: "Revenue Review",
+        tags: ["finance", "q2"]
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      ok: true,
+      session: {
+        sessionId: "session-detail",
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String),
+        messageCount: 2,
+        title: "Revenue Review",
+        tags: ["finance", "q2"],
+        lastMessage: {
+          role: "assistant",
+          content: "hi there"
+        },
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "hi there" }
+        ]
+      }
+    });
+    expect(sessionStore.read("session-detail")).toMatchObject({
+      title: "Revenue Review",
+      tags: ["finance", "q2"]
+    });
+
+    await app.close();
+  });
+
+  it("forks a stored agent session for collaboration", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-source", [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" }
+    ]);
+    sessionStore.updateMetadata("session-source", {
+      title: "Revenue Review",
+      tags: ["finance"]
+    });
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agent/sessions/session-source/fork",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      },
+      payload: {
+        sessionId: "session-fork",
+        title: "Revenue Review Branch"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      ok: true,
+      sourceSessionId: "session-source",
+      session: {
+        sessionId: "session-fork",
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String),
+        messageCount: 2,
+        title: "Revenue Review Branch",
+        tags: ["finance"],
+        forkedFromSessionId: "session-source",
+        lastMessage: {
+          role: "assistant",
+          content: "hi there"
+        },
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "hi there" }
+        ]
+      }
+    });
+    expect(sessionStore.read("session-fork")).toMatchObject({
+      title: "Revenue Review Branch",
+      tags: ["finance"],
+      forkedFromSessionId: "session-source"
+    });
+
+    await app.close();
+  });
+
+  it("returns 404 when an agent session is missing", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const app = await buildApi({
+      sessionStore: new InMemorySessionStore()
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agent/sessions/missing",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().code).toBe("AGENT_SESSION_NOT_FOUND");
+
+    await app.close();
+  });
+
+  it("deletes one stored agent session", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-delete", [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" }
+    ]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/agent/sessions/session-delete",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      ok: true,
+      sessionId: "session-delete",
+      deleted: true
+    });
+    expect(sessionStore.get("session-delete")).toEqual([]);
+
+    await app.close();
+  });
+
+  it("clears all stored agent sessions", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-a", [
+      { role: "user", content: "hello" }
+    ]);
+    sessionStore.append("session-b", [
+      { role: "assistant", content: "hi there" }
+    ]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/agent/sessions",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      ok: true,
+      deletedCount: 2
+    });
+    expect(sessionStore.list()).toEqual([]);
+
+    await app.close();
+  });
+
+  it("returns operator runtime telemetry", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-a", [{ role: "user", content: "hello" }]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+
+    await app.inject({ method: "GET", url: "/health" });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/ops/runtime",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      sessionCount: 1,
+      toolCount: expect.any(Number),
+      runtime: {
+        startedAt: expect.any(String),
+        totalRequests: expect.any(Number),
+        routes: expect.arrayContaining([
+          expect.objectContaining({
+            route: "/health",
+            requests: 1
+          })
+        ])
+      }
+    });
+
+    await app.close();
+  });
+
+  it("returns analysis agent observability", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const agentExecutor = createAgentExecutor([
+      {
+        id: "resp_analysis_observe",
+        output_text: "Hello",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Hello" }]
+          }
+        ]
+      }
+    ]);
+
+    await agentExecutor.executeTurn({
+      sessionId: "ops-analysis-observe",
+      message: "Hi"
+    });
+
+    const app = await buildApi({
+      agentExecutor
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/ops/analysis-agent",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      observability: {
+        summary: {
+          totalTurns: 1,
+          completedTurns: 1,
+          failedTurns: 0
+        },
+        recentTurns: [
+          expect.objectContaining({
+            sessionId: "ops-analysis-observe",
+            status: "completed"
+          })
+        ]
+      }
+    });
+    expect(response.json().latestEvaluation).toBeUndefined();
+
+    await app.close();
+  });
+
+  it("runs analysis agent evaluations and stores the latest report", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const agentExecutor = createAgentExecutor([
+      {
+        id: "resp_analysis_eval_tool",
+        output: [
+          {
+            type: "function_call",
+            call_id: "call_analysis_eval_1",
+            name: "validate-sql",
+            arguments: "{\"sql\":\"select id from Tenant limit 1\"}"
+          }
+        ]
+      },
+      {
+        id: "resp_analysis_eval_final",
+        output_text: "The query is safe.",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "The query is safe." }]
+          }
+        ]
+      }
+    ]);
+
+    const app = await buildApi({
+      agentExecutor,
+      analysisAgentEvaluationCases: [
+        {
+          id: "sql-safety",
+          message: "Can I run select id from Tenant limit 1?",
+          expected: {
+            requiredToolNames: ["validate-sql"],
+            outputIncludes: ["safe"],
+            minToolCalls: 1
+          }
+        }
+      ]
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ops/analysis-agent/evals",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      evaluation: {
+        totalCases: 1,
+        passedCases: 1,
+        failedCases: 0,
+        results: [
+          expect.objectContaining({
+            caseId: "sql-safety",
+            passed: true,
+            toolNames: ["validate-sql"]
+          })
+        ]
+      },
+      observability: {
+        summary: {
+          totalTurns: 1
+        }
+      }
+    });
+
+    const latest = await app.inject({
+      method: "GET",
+      url: "/api/ops/analysis-agent",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(latest.statusCode).toBe(200);
+    expect(latest.json()).toMatchObject({
+      ok: true,
+      latestEvaluation: {
+        totalCases: 1,
+        passedCases: 1,
+        failedCases: 0
+      }
+    });
+
+    await app.close();
+  });
+
+  it("blocks operator session endpoints when the operator api key is missing", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-a", [
+      { role: "user", content: "hello" }
+    ]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agent/sessions"
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().code).toBe("OPERATOR_API_KEY_REQUIRED");
+
+    await app.close();
+  });
+
+  it("blocks operator session endpoints when the operator api key is not configured", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const app = await buildApi({
+      sessionStore: new InMemorySessionStore()
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agent/sessions"
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().code).toBe("OPERATOR_API_KEY_NOT_CONFIGURED");
+
+    const auditEntry = warnSpy.mock.calls
+      .map((call) => String(call[0]))
+      .map(
+        (entry) =>
+          JSON.parse(entry) as {
+            scope: string;
+            context?: {
+              action?: string;
+              status?: string;
+              details?: { code?: string };
+            };
+          }
+      )
+      .find(
+        (entry) =>
+          entry.scope === "security.audit" &&
+          entry.context?.action === "agent.sessions.list"
+      );
+
+    expect(auditEntry?.context).toMatchObject({
+      action: "agent.sessions.list",
+      status: "failed",
+      details: {
+        code: "OPERATOR_API_KEY_NOT_CONFIGURED"
+      }
+    });
+
+    await app.close();
+  });
+
+  it("blocks operator session endpoints when the operator api key is invalid", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    const sessionStore = new InMemorySessionStore();
+
+    sessionStore.append("session-a", [
+      { role: "user", content: "hello" }
+    ]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/agent/sessions/session-a",
+      headers: {
+        "x-operator-api-key": "wrong-key"
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().code).toBe("INVALID_OPERATOR_API_KEY");
+
+    const auditEntry = warnSpy.mock.calls
+      .map((call) => String(call[0]))
+      .map(
+        (entry) =>
+          JSON.parse(entry) as {
+            scope: string;
+            context?: {
+              action?: string;
+              status?: string;
+              details?: { code?: string; sessionId?: string };
+            };
+          }
+      )
+      .find(
+        (entry) =>
+          entry.scope === "security.audit" &&
+          entry.context?.action === "agent.sessions.delete"
+      );
+
+    expect(auditEntry?.context).toMatchObject({
+      action: "agent.sessions.delete",
+      status: "blocked",
+      details: {
+        code: "INVALID_OPERATOR_API_KEY",
+        sessionId: "session-a"
+      }
     });
 
     await app.close();
@@ -1084,19 +2034,29 @@ describe("api", () => {
       method: "POST",
       url: "/api/sql/query",
       payload: {
-        sql: "select id, name from Tenant limit 2"
+        sql: "select id, name from Tenant limit 2",
+        pageLimit: 1
       }
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       columns: ["id", "name"],
-      rows: [
-        { id: "tenant-a", name: "Tenant A" },
-        { id: "tenant-b", name: "Tenant B" }
-      ],
+      rows: [{ id: "tenant-a", name: "Tenant A" }],
       rowCount: 2,
       durationMs: 12,
+      page: {
+        offset: 0,
+        limit: 1,
+        returnedRows: 1,
+        hasMore: true
+      },
+      cache: {
+        key: expect.stringMatching(/^query:[a-f0-9]{64}$/),
+        hit: false,
+        createdAt: expect.any(String),
+        expiresAt: expect.any(String)
+      },
       validation: {
         allowed: true,
         normalizedSql: "select id, name from Tenant limit 2",
@@ -1129,9 +2089,158 @@ describe("api", () => {
       status: "completed",
       details: {
         rowCount: 2,
-        referencedTables: ["Tenant"]
+        referencedTables: ["Tenant"],
+        cacheHit: false
       }
     });
+
+    await app.close();
+  });
+
+  it("reuses cached SQL results across paginated requests", async () => {
+    const queryExecutor = createQueryExecutor({
+      columns: ["id", "name"],
+      rows: [
+        { id: "tenant-a", name: "Tenant A" },
+        { id: "tenant-b", name: "Tenant B" }
+      ],
+      rowCount: 2,
+      durationMs: 12
+    });
+    const app = await buildApi({
+      metadataCatalog: createCatalogWithTables([
+        {
+          name: "Tenant",
+          columns: [
+            { name: "id", dataType: "String" },
+            { name: "name", dataType: "String" }
+          ]
+        }
+      ]),
+      queryExecutor
+    });
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/sql/query",
+      payload: {
+        sql: "select id, name from Tenant limit 2",
+        pageLimit: 1
+      }
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/sql/query",
+      payload: {
+        sql: "select id, name from Tenant limit 2",
+        offset: 1,
+        pageLimit: 1
+      }
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(first.json().cache).toMatchObject({
+      hit: false
+    });
+    expect(second.json()).toMatchObject({
+      rows: [{ id: "tenant-b", name: "Tenant B" }],
+      page: {
+        offset: 1,
+        limit: 1,
+        returnedRows: 1,
+        hasMore: false
+      },
+      cache: {
+        hit: true
+      }
+    });
+    expect(queryExecutor.executeReadOnlyQuery).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+
+  it("runs SQL queries asynchronously and returns paged results by job id", async () => {
+    const queryExecutor = createQueryExecutor({
+      columns: ["id", "name"],
+      rows: [
+        { id: "tenant-a", name: "Tenant A" },
+        { id: "tenant-b", name: "Tenant B" }
+      ],
+      rowCount: 2,
+      durationMs: 12
+    });
+    const app = await buildApi({
+      metadataCatalog: createCatalogWithTables([
+        {
+          name: "Tenant",
+          columns: [
+            { name: "id", dataType: "String" },
+            { name: "name", dataType: "String" }
+          ]
+        }
+      ]),
+      queryExecutor
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      url: "/api/sql/query/async",
+      payload: {
+        sql: "select id, name from Tenant limit 2"
+      }
+    });
+    const jobId = started.json().job.jobId as string;
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const status = await app.inject({
+      method: "GET",
+      url: `/api/sql/query/jobs/${jobId}`
+    });
+    const result = await app.inject({
+      method: "GET",
+      url: `/api/sql/query/jobs/${jobId}/result?offset=1&pageLimit=1`
+    });
+
+    expect(started.statusCode).toBe(200);
+    expect(started.json()).toMatchObject({
+      ok: true,
+      job: {
+        jobId: expect.any(String),
+        status: "running"
+      }
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      ok: true,
+      job: {
+        jobId,
+        status: "completed",
+        rowCount: 2,
+        durationMs: 12
+      }
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.json()).toMatchObject({
+      ok: true,
+      job: {
+        jobId,
+        status: "completed"
+      },
+      result: {
+        rows: [{ id: "tenant-b", name: "Tenant B" }],
+        rowCount: 2,
+        page: {
+          offset: 1,
+          limit: 1,
+          returnedRows: 1,
+          hasMore: false
+        }
+      }
+    });
+    expect(queryExecutor.executeReadOnlyQuery).toHaveBeenCalledTimes(1);
 
     await app.close();
   });
@@ -1277,7 +2386,167 @@ describe("api", () => {
     });
 
     expect(response.statusCode).toBe(503);
-    expect(response.json().code).toBe("DATABASE_QUERY_NOT_CONFIGURED");
+    expect(response.json()).toMatchObject({
+      ok: false,
+      message:
+        "Database query execution is not configured. Set DATABASE_URL to enable SQL query execution.",
+      code: "DATABASE_QUERY_NOT_CONFIGURED",
+      error: {
+        code: "DATABASE_QUERY_NOT_CONFIGURED",
+        statusCode: 503
+      }
+    });
+
+    await app.close();
+  });
+
+  it("rate limits repeated chat requests", async () => {
+    vi.stubEnv("API_RATE_LIMIT_MAX_CHAT_REQUESTS", "1");
+    const app = await buildApi({
+      agentExecutor: createAgentExecutor([
+        {
+          id: "resp_rate_chat",
+          output_text: "hello",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "hello" }]
+            }
+          ]
+        }
+      ])
+    });
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      payload: {
+        sessionId: "rate-chat",
+        message: "hello"
+      }
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      payload: {
+        sessionId: "rate-chat",
+        message: "hello again"
+      }
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(429);
+    expect(second.headers["retry-after"]).toBeDefined();
+    expect(second.json()).toMatchObject({
+      code: "CHAT_RATE_LIMITED",
+      error: {
+        statusCode: 429
+      }
+    });
+
+    await app.close();
+  });
+
+  it("rate limits repeated operator session requests", async () => {
+    vi.stubEnv("OPERATOR_API_KEY", "secret-operator");
+    vi.stubEnv("API_RATE_LIMIT_MAX_OPERATOR_REQUESTS", "1");
+    const sessionStore = new InMemorySessionStore();
+    sessionStore.append("session-a", [{ role: "user", content: "hello" }]);
+
+    const app = await buildApi({
+      sessionStore
+    });
+
+    const first = await app.inject({
+      method: "GET",
+      url: "/api/agent/sessions",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+    const second = await app.inject({
+      method: "GET",
+      url: "/api/agent/sessions",
+      headers: {
+        "x-operator-api-key": "secret-operator"
+      }
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(429);
+    expect(second.json()).toMatchObject({
+      code: "OPERATOR_RATE_LIMITED",
+      error: {
+        statusCode: 429
+      }
+    });
+
+    await app.close();
+  });
+
+  it("reports structured error details for invalid chat requests", async () => {
+    const app = await buildApi({
+      agentExecutor: createAgentExecutor([
+        {
+          id: "unused",
+          output_text: "unused",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "unused" }]
+            }
+          ]
+        }
+      ])
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      payload: {
+        message: "missing session"
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      ok: false,
+      message: "sessionId and message are required",
+      code: "INVALID_CHAT_REQUEST",
+      error: {
+        code: "INVALID_CHAT_REQUEST",
+        statusCode: 400,
+        requestId: expect.any(String)
+      }
+    });
+
+    await app.close();
+  });
+
+  it("applies tool governance to the built-in tool registry", async () => {
+    vi.stubEnv("AGENT_ALLOWED_TOOLS", "search-metadata,query-sql");
+    vi.stubEnv("AGENT_BLOCKED_TOOLS", "suggest-chart");
+
+    const app = await buildApi({
+      queryExecutor: createQueryExecutor({
+        columns: ["id"],
+        rows: [{ id: "tenant-a" }],
+        rowCount: 1,
+        durationMs: 5
+      })
+    });
+    const response = await app.inject({ method: "GET", url: "/api/overview" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "search-metadata",
+      "query-sql"
+    ]);
+    expect(response.json().toolGovernance).toMatchObject({
+      allowedTools: ["query-sql", "search-metadata"],
+      blockedTools: ["suggest-chart"]
+    });
 
     await app.close();
   });
@@ -1299,7 +2568,7 @@ describe("api", () => {
       });
       expect(existsSync(sessionStorePath)).toBe(true);
       expect(JSON.parse(readFileSync(sessionStorePath, "utf8"))).toEqual({
-        version: 1,
+        version: 2,
         sessions: {}
       });
 
@@ -1407,5 +2676,12 @@ function createCatalogWithTables(
       relationCount: 0
     }
   };
+}
+
+function createSemanticCatalog(metadataCatalog: PrismaSchemaCatalog): SemanticCatalog {
+  return buildSemanticCatalogFromMetadata(metadataCatalog, {
+    sourcePath: `generated://${metadataCatalog.sourcePath}`,
+    loadedAt: metadataCatalog.loadedAt
+  });
 }
 

@@ -6,6 +6,8 @@ import {
   assertAccess,
   assertAccessRequestInput,
   assertChatRequestSecurity,
+  assertSessionIdInput,
+  assertSessionMetadataInput,
   assertDatasetProfileRequestSecurity,
   assertSqlRequestSecurity,
   assertTimeSeriesRequestSecurity,
@@ -77,6 +79,45 @@ describe("security", () => {
         policy
       )
     ).toThrow("message is too large");
+  });
+
+  it("guards session metadata limits", () => {
+    const policy = buildRequestSecurityPolicy({
+      maxSessionTitleChars: 4,
+      maxSessionTags: 1,
+      maxSessionTagChars: 3
+    });
+
+    expect(() =>
+      assertSessionIdInput("session-12345", buildRequestSecurityPolicy({ maxSessionIdChars: 4 }))
+    ).toThrow("sessionId is too large");
+
+    expect(() =>
+      assertSessionMetadataInput(
+        {
+          title: "hello"
+        },
+        policy
+      )
+    ).toThrow("title is too large");
+
+    expect(() =>
+      assertSessionMetadataInput(
+        {
+          tags: ["north", "south"]
+        },
+        policy
+      )
+    ).toThrow("Too many session tags");
+
+    expect(() =>
+      assertSessionMetadataInput(
+        {
+          tags: ["west"]
+        },
+        policy
+      )
+    ).toThrow("tag is too large");
   });
 
   it("rejects prompt injection attempts in chat messages", () => {

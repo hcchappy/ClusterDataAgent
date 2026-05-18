@@ -125,6 +125,32 @@ export interface MetadataSearchResult {
   readonly score: number;
 }
 
+export interface MetadataDataTypeSummary {
+  readonly dataType: string;
+  readonly count: number;
+}
+
+export interface MetadataRelationHotspot {
+  readonly tableName: string;
+  readonly relationCount: number;
+}
+
+export interface MetadataTableInsight {
+  readonly tableName: string;
+  readonly columnCount: number;
+  readonly relationCount: number;
+  readonly sampleColumns: readonly TableColumn[];
+  readonly relatedTables: readonly string[];
+  readonly starterQuery: string;
+}
+
+export interface MetadataCatalogInsights {
+  readonly summary: PrismaSchemaCatalog["summary"];
+  readonly dataTypes: readonly MetadataDataTypeSummary[];
+  readonly relationHotspots: readonly MetadataRelationHotspot[];
+  readonly tables: readonly MetadataTableInsight[];
+}
+
 export interface MetadataCacheEntry {
   readonly mtimeMs: number;
   readonly catalog: PrismaSchemaCatalog;
@@ -596,6 +622,106 @@ export function searchMetadataCatalog(
   return results.sort((left, right) => right.score - left.score).slice(0, limit);
 }
 
+export function buildMetadataCatalogInsights(
+  catalog: PrismaSchemaCatalog,
+  options: {
+    readonly tableLimit?: number;
+    readonly columnLimit?: number;
+  } = {}
+): MetadataCatalogInsights {
+  const tableLimit = options.tableLimit ?? 8;
+  const columnLimit = options.columnLimit ?? 6;
+
+  if (!Number.isInteger(tableLimit) || tableLimit <= 0 || tableLimit > 50) {
+    throw new AppError("tableLimit must be between 1 and 50", "INVALID_METADATA_TABLE_LIMIT", 400, {
+      tableLimit
+    });
+  }
+
+  if (!Number.isInteger(columnLimit) || columnLimit <= 0 || columnLimit > 20) {
+    throw new AppError("columnLimit must be between 1 and 20", "INVALID_METADATA_COLUMN_LIMIT", 400, {
+      columnLimit
+    });
+  }
+
+  const relationCounts = new Map<string, number>();
+
+  for (const relation of catalog.relations) {
+    relationCounts.set(relation.fromTable, (relationCounts.get(relation.fromTable) ?? 0) + 1);
+    relationCounts.set(relation.toTable, (relationCounts.get(relation.toTable) ?? 0) + 1);
+  }
+
+  const dataTypeCounts = [...catalog.tables.flatMap((table) => table.columns)].reduce(
+    (counts, column) => {
+      counts.set(column.dataType, (counts.get(column.dataType) ?? 0) + 1);
+      return counts;
+    },
+    new Map<string, number>()
+  );
+
+  const tableInsights = catalog.tables
+    .map((table) => {
+      const relatedTables = [
+        ...new Set(
+          catalog.relations.flatMap((relation) => {
+            if (relation.fromTable === table.name) {
+              return [relation.toTable];
+            }
+
+            if (relation.toTable === table.name) {
+              return [relation.fromTable];
+            }
+
+            return [];
+          })
+        )
+      ].sort((left, right) => left.localeCompare(right));
+      const sampleColumns = table.columns.slice(0, columnLimit);
+
+      return {
+        tableName: table.name,
+        columnCount: table.columns.length,
+        relationCount: relationCounts.get(table.name) ?? 0,
+        sampleColumns,
+        relatedTables,
+        starterQuery: buildMetadataStarterQuery(table.name, sampleColumns)
+      } satisfies MetadataTableInsight;
+    })
+    .sort(
+      (left, right) =>
+        right.relationCount - left.relationCount ||
+        right.columnCount - left.columnCount ||
+        left.tableName.localeCompare(right.tableName)
+    )
+    .slice(0, tableLimit);
+
+  return {
+    summary: catalog.summary,
+    dataTypes: [...dataTypeCounts.entries()]
+      .map(([dataType, count]) => ({ dataType, count }))
+      .sort((left, right) => right.count - left.count || left.dataType.localeCompare(right.dataType)),
+    relationHotspots: [...relationCounts.entries()]
+      .map(([tableName, relationCount]) => ({
+        tableName,
+        relationCount
+      }))
+      .sort(
+        (left, right) =>
+          right.relationCount - left.relationCount || left.tableName.localeCompare(right.tableName)
+      ),
+    tables: tableInsights
+  };
+}
+
+function buildMetadataStarterQuery(
+  tableName: string,
+  columns: readonly TableColumn[]
+): string {
+  const selectedColumns = columns.map((column) => column.name).join(", ");
+
+  return `select ${selectedColumns || "*"} from ${tableName} limit 20`;
+}
+
 export function buildRelationGraph(
   tables: readonly TableDefinition[]
 ): readonly RelationEdge[] {
@@ -906,3 +1032,5 @@ interface PrismaModelBuilder {
   dbName?: string;
   fields: PrismaFieldDefinition[];
 }
+
+export * from "./semantic.js";

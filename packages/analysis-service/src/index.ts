@@ -37,6 +37,30 @@ export interface DatasetProfile {
   readonly quality: DatasetQualitySummary;
 }
 
+export type DatasetInsightKind = "quality" | "trend" | "breakdown" | "correlation";
+
+export interface DatasetInsightMetric {
+  readonly label: string;
+  readonly value: string | number;
+}
+
+export interface DatasetInsight {
+  readonly kind: DatasetInsightKind;
+  readonly title: string;
+  readonly summary: string;
+  readonly fields: readonly string[];
+  readonly metrics?: readonly DatasetInsightMetric[];
+}
+
+export interface DatasetInsightsRequest extends DatasetProfileRequest {
+  readonly maxInsights?: number;
+}
+
+export interface DatasetInsightsResult {
+  readonly profile: DatasetProfile;
+  readonly insights: readonly DatasetInsight[];
+}
+
 export interface TimeSeriesPoint {
   readonly timestamp: string;
   readonly value: number;
@@ -381,6 +405,65 @@ export function profileDataset(request: DatasetProfileRequest): DatasetProfile {
   };
 }
 
+export function generateDatasetInsights(
+  request: DatasetInsightsRequest
+): DatasetInsightsResult {
+  const maxInsights = request.maxInsights ?? 6;
+
+  if (!Number.isInteger(maxInsights) || maxInsights <= 0 || maxInsights > 12) {
+    throw new AppError("maxInsights must be between 1 and 12", "INVALID_INSIGHT_LIMIT", 400);
+  }
+
+  const profile = profileDataset(request);
+  const insights: DatasetInsight[] = [];
+
+  const qualityInsight = buildQualityInsight(profile);
+
+  if (qualityInsight) {
+    insights.push(qualityInsight);
+  }
+
+  const trendInsight = buildTrendInsight(request.rows, profile);
+
+  if (trendInsight) {
+    insights.push(trendInsight);
+  }
+
+  const breakdownInsight = buildBreakdownInsight(request.rows, profile);
+
+  if (breakdownInsight) {
+    insights.push(breakdownInsight);
+  }
+
+  const correlationInsight = buildCorrelationInsight(request.rows, profile);
+
+  if (correlationInsight) {
+    insights.push(correlationInsight);
+  }
+
+  if (insights.length === 0) {
+    insights.push({
+      kind: "quality",
+      title: "Dataset looks healthy",
+      summary: `${profile.rowCount} rows across ${profile.fieldCount} fields with no major warnings.`,
+      fields: []
+    });
+  }
+
+  const result = {
+    profile,
+    insights: insights.slice(0, maxInsights)
+  } satisfies DatasetInsightsResult;
+
+  logger.info("dataset insights generated", {
+    rowCount: profile.rowCount,
+    fieldCount: profile.fieldCount,
+    insightCount: result.insights.length
+  });
+
+  return result;
+}
+
 function buildFieldProfile(
   accumulator: FieldAccumulator,
   maxCategoryValues: number,
@@ -488,6 +571,223 @@ function buildQualitySummary(
     mixedFieldCount,
     duplicateRowCount,
     warnings
+  };
+}
+
+function buildQualityInsight(profile: DatasetProfile): DatasetInsight | undefined {
+  if (profile.quality.warnings.length === 0) {
+    return undefined;
+  }
+
+  return {
+    kind: "quality",
+    title: "Data quality watchouts",
+    summary: profile.quality.warnings.slice(0, 3).join("; "),
+    fields: profile.fields
+      .filter((field) => field.missingRatio >= 0.5 || field.kind === "mixed" || field.kind === "empty")
+      .map((field) => field.name)
+      .slice(0, 4),
+    metrics: [
+      { label: "emptyFields", value: profile.quality.emptyFieldCount },
+      { label: "highMissing", value: profile.quality.highMissingFieldCount },
+      { label: "mixedFields", value: profile.quality.mixedFieldCount },
+      { label: "duplicates", value: profile.quality.duplicateRowCount }
+    ]
+  };
+}
+
+function buildTrendInsight(
+  rows: readonly DatasetRow[],
+  profile: DatasetProfile
+): DatasetInsight | undefined {
+  const dateField = profile.fields.find((field) => field.kind === "date");
+  const metricField = profile.fields.find((field) => field.kind === "number");
+
+  if (!dateField || !metricField) {
+    return undefined;
+  }
+
+  const aggregated = new Map<string, number>();
+
+  for (const row of rows) {
+    const timestamp = row[dateField.name];
+    const value = row[metricField.name];
+
+    if (isMissing(timestamp) || isMissing(value)) {
+      continue;
+    }
+
+    if (detectValueKind(timestamp) !== "date" || detectValueKind(value) !== "number") {
+      continue;
+    }
+
+    const bucket = toDate(timestamp).toISOString();
+    aggregated.set(bucket, (aggregated.get(bucket) ?? 0) + toFiniteNumber(value));
+  }
+
+  if (aggregated.size < 2) {
+    return undefined;
+  }
+
+  const analysis = analyzeTimeSeries({
+    points: [...aggregated.entries()]
+      .map(([timestamp, value]) => ({ timestamp, value }))
+      .sort((left, right) => left.timestamp.localeCompare(right.timestamp))
+  });
+  const direction =
+    analysis.change.direction === "up"
+      ? "rose"
+      : analysis.change.direction === "down"
+        ? "fell"
+        : "held steady";
+
+  return {
+    kind: "trend",
+    title: `${metricField.name} trend`,
+    summary: `${metricField.name} ${direction} by ${formatInsightNumber(analysis.change.absolute)} across ${analysis.pointCount} time buckets.`,
+    fields: [dateField.name, metricField.name],
+    metrics: [
+      { label: "change", value: formatInsightNumber(analysis.change.absolute) },
+      {
+        label: "changePct",
+        value:
+          analysis.change.percent === null
+            ? "n/a"
+            : `${(analysis.change.percent * 100).toFixed(1)}%`
+      },
+      { label: "interval", value: analysis.interval.unit },
+      { label: "anomalies", value: analysis.anomalies.length }
+    ]
+  };
+}
+
+function buildBreakdownInsight(
+  rows: readonly DatasetRow[],
+  profile: DatasetProfile
+): DatasetInsight | undefined {
+  const categoryField = profile.fields.find(
+    (field) => field.kind === "string" && field.distinctCount >= 2 && field.distinctCount <= 24
+  );
+  const metricField = profile.fields.find((field) => field.kind === "number");
+
+  if (!categoryField || !metricField) {
+    return undefined;
+  }
+
+  const categoryTotals = new Map<string, number>();
+
+  for (const row of rows) {
+    const category = row[categoryField.name];
+    const value = row[metricField.name];
+
+    if (typeof category !== "string" || detectValueKind(value) !== "number") {
+      continue;
+    }
+
+    categoryTotals.set(category, (categoryTotals.get(category) ?? 0) + toFiniteNumber(value));
+  }
+
+  const rankedCategories = [...categoryTotals.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value));
+
+  if (rankedCategories.length < 2) {
+    return undefined;
+  }
+
+  const topCategory = rankedCategories[0];
+  const total = rankedCategories.reduce((sum, item) => sum + item.count, 0);
+  const share = total === 0 ? 0 : topCategory.count / total;
+
+  return {
+    kind: "breakdown",
+    title: `${metricField.name} by ${categoryField.name}`,
+    summary: `${topCategory.value} contributes ${(share * 100).toFixed(1)}% of summed ${metricField.name} across ${rankedCategories.length} groups.`,
+    fields: [categoryField.name, metricField.name],
+    metrics: [
+      { label: "topCategory", value: topCategory.value },
+      { label: "topValue", value: formatInsightNumber(topCategory.count) },
+      { label: "groupCount", value: rankedCategories.length }
+    ]
+  };
+}
+
+function buildCorrelationInsight(
+  rows: readonly DatasetRow[],
+  profile: DatasetProfile
+): DatasetInsight | undefined {
+  const numericFields = profile.fields.filter((field) => field.kind === "number");
+  let bestPair:
+    | {
+        readonly left: string;
+        readonly right: string;
+        readonly correlation: number;
+        readonly count: number;
+      }
+    | undefined;
+
+  for (let leftIndex = 0; leftIndex < numericFields.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < numericFields.length; rightIndex += 1) {
+      const leftField = numericFields[leftIndex];
+      const rightField = numericFields[rightIndex];
+      const pairs = rows
+        .map((row) => ({
+          left: row[leftField.name],
+          right: row[rightField.name]
+        }))
+        .filter(
+          (pair) => detectValueKind(pair.left) === "number" && detectValueKind(pair.right) === "number"
+        )
+        .map((pair) => ({
+          left: toFiniteNumber(pair.left),
+          right: toFiniteNumber(pair.right)
+        }));
+
+      if (pairs.length < 3) {
+        continue;
+      }
+
+      const correlation = calculatePearsonCorrelation(
+        pairs.map((pair) => pair.left),
+        pairs.map((pair) => pair.right)
+      );
+
+      if (!Number.isFinite(correlation) || Math.abs(correlation) < 0.4) {
+        continue;
+      }
+
+      if (!bestPair || Math.abs(correlation) > Math.abs(bestPair.correlation)) {
+        bestPair = {
+          left: leftField.name,
+          right: rightField.name,
+          correlation,
+          count: pairs.length
+        };
+      }
+    }
+  }
+
+  if (!bestPair) {
+    return undefined;
+  }
+
+  const strength =
+    Math.abs(bestPair.correlation) >= 0.8
+      ? "strong"
+      : Math.abs(bestPair.correlation) >= 0.6
+        ? "moderate"
+        : "light";
+  const direction = bestPair.correlation > 0 ? "positive" : "negative";
+
+  return {
+    kind: "correlation",
+    title: `${bestPair.left} vs ${bestPair.right}`,
+    summary: `${bestPair.left} and ${bestPair.right} show a ${strength} ${direction} relationship across ${bestPair.count} rows.`,
+    fields: [bestPair.left, bestPair.right],
+    metrics: [
+      { label: "correlation", value: bestPair.correlation.toFixed(2) },
+      { label: "samples", value: bestPair.count }
+    ]
   };
 }
 
@@ -613,6 +913,46 @@ function toDate(value: unknown): Date {
   }
 
   return date;
+}
+
+function calculatePearsonCorrelation(
+  leftValues: readonly number[],
+  rightValues: readonly number[]
+): number {
+  if (leftValues.length !== rightValues.length || leftValues.length < 2) {
+    return Number.NaN;
+  }
+
+  const leftAverage = leftValues.reduce((sum, value) => sum + value, 0) / leftValues.length;
+  const rightAverage = rightValues.reduce((sum, value) => sum + value, 0) / rightValues.length;
+  let numerator = 0;
+  let leftVariance = 0;
+  let rightVariance = 0;
+
+  for (let index = 0; index < leftValues.length; index += 1) {
+    const leftDelta = leftValues[index] - leftAverage;
+    const rightDelta = rightValues[index] - rightAverage;
+
+    numerator += leftDelta * rightDelta;
+    leftVariance += leftDelta ** 2;
+    rightVariance += rightDelta ** 2;
+  }
+
+  const denominator = Math.sqrt(leftVariance * rightVariance);
+
+  if (denominator <= NUMBER_EPSILON) {
+    return Number.NaN;
+  }
+
+  return numerator / denominator;
+}
+
+function formatInsightNumber(value: number): string {
+  if (Number.isInteger(value)) {
+    return String(value);
+  }
+
+  return value.toFixed(2);
 }
 
 function calculateMedian(sortedValues: readonly number[]): number {

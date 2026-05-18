@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "tenant",
+      "label": "Tenant",
+      "tableName": "Tenant",
+      "primaryKey": "id",
+      "description": "Tenant master records for the workspace.",
+      "owner": "platform",
+      "refreshCadence": "realtime",
+      "synonyms": ["tenants", "workspace tenant", "租户"],
+      "defaultMetricIds": ["tenant_count"],
+      "dimensions": [
+        {
+          "id": "id",
+          "label": "Tenant ID",
+          "columnName": "id",
+          "dataType": "string",
+          "synonyms": ["tenant id"]
+        },
+        {
+          "id": "name",
+          "label": "Tenant Name",
+          "columnName": "name",
+          "dataType": "string",
+          "synonyms": ["tenant", "workspace name", "租户名称"]
+        },
+        {
+          "id": "createdAt",
+          "label": "Tenant Created At",
+          "columnName": "createdAt",
+          "dataType": "date",
+          "isTimeDimension": true,
+          "synonyms": ["tenant created date", "租户创建时间"]
+        }
+      ]
+    },
+    {
+      "id": "auditLog",
+      "label": "Audit Log",
+      "tableName": "AuditLog",
+      "primaryKey": "id",
+      "description": "Audit trail records by tenant action.",
+      "owner": "security",
+      "refreshCadence": "realtime",
+      "synonyms": ["audit", "audit events", "日志", "审计日志"],
+      "defaultMetricIds": ["audit_log_count"],
+      "dimensions": [
+        {
+          "id": "id",
+          "label": "Audit Log ID",
+          "columnName": "id",
+          "dataType": "string"
+        },
+        {
+          "id": "tenantId",
+          "label": "Audit Tenant ID",
+          "columnName": "tenantId",
+          "dataType": "string",
+          "synonyms": ["tenant id", "租户ID"]
+        },
+        {
+          "id": "action",
+          "label": "Audit Action",
+          "columnName": "action",
+          "dataType": "string",
+          "synonyms": ["event action", "事件动作"]
+        },
+        {
+          "id": "createdAt",
+          "label": "Audit Created At",
+          "columnName": "createdAt",
+          "dataType": "date",
+          "isTimeDimension": true,
+          "synonyms": ["audit date", "日志时间"]
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "tenant_count",
+      "label": "Tenant Count",
+      "modelId": "tenant",
+      "aggregation": "count",
+      "columnName": "id",
+      "description": "Total number of tenant records.",
+      "owner": "platform",
+      "refreshCadence": "realtime",
+      "format": "integer",
+      "synonyms": ["tenant total", "tenants", "租户数"],
+      "allowedDimensionIds": ["tenant.name", "tenant.createdAt"],
+      "defaultTimeDimensionId": "tenant.createdAt"
+    },
+    {
+      "id": "audit_log_count",
+      "label": "Audit Log Count",
+      "modelId": "auditLog",
+      "aggregation": "count",
+      "columnName": "id",
+      "description": "Total number of audit log records.",
+      "owner": "security",
+      "refreshCadence": "realtime",
+      "format": "integer",
+      "synonyms": ["audit events", "event count", "日志数", "审计事件数"],
+      "allowedDimensionIds": ["auditLog.tenantId", "auditLog.action", "auditLog.createdAt"],
+      "defaultTimeDimensionId": "auditLog.createdAt"
+    },
+    {
+      "id": "tenant_with_audit_count",
+      "label": "Tenants With Audit Logs",
+      "modelId": "auditLog",
+      "aggregation": "countDistinct",
+      "columnName": "tenantId",
+      "description": "Distinct tenants represented in the audit trail.",
+      "owner": "security",
+      "refreshCadence": "realtime",
+      "format": "integer",
+      "synonyms": ["active audited tenants", "有日志的租户数"],
+      "allowedDimensionIds": ["auditLog.action", "auditLog.createdAt"],
+      "defaultTimeDimensionId": "auditLog.createdAt"
+    }
+  ]
+}

@@ -94,6 +94,17 @@ export interface ToolExecutionHooks {
 export interface ToolRegistryOptions {
   readonly hooks?: ToolExecutionHooks;
   readonly logger?: Logger;
+  readonly governance?: ToolGovernancePolicy;
+}
+
+export interface ToolGovernancePolicy {
+  readonly allowedTools?: readonly string[];
+  readonly blockedTools?: readonly string[];
+}
+
+export interface ToolGovernanceSummary {
+  readonly allowedTools: readonly string[];
+  readonly blockedTools: readonly string[];
 }
 
 export type ToolDiscoverySource =
@@ -118,13 +129,24 @@ export class ToolRegistry {
   private readonly hooks?: ToolExecutionHooks;
   private readonly logger: Logger;
   private readonly metrics = new Map<string, MutableToolMetrics>();
+  private readonly governance: ToolGovernanceSummary;
 
   public constructor(options: ToolRegistryOptions = {}) {
     this.hooks = options.hooks;
     this.logger = options.logger ?? createLogger("tool-system");
+    this.governance = normalizeToolGovernance(options.governance);
   }
 
   public register<TInput, TResult>(tool: ToolDefinition<TInput, TResult>): void {
+    if (!this.isAllowedByGovernance(tool.name)) {
+      this.logger.warn("tool registration skipped by governance policy", {
+        toolName: tool.name,
+        allowedTools: this.governance.allowedTools,
+        blockedTools: this.governance.blockedTools
+      });
+      return;
+    }
+
     if (this.tools.has(tool.name)) {
       throw new AppError(
         `Tool already registered: ${tool.name}`,
@@ -167,6 +189,13 @@ export class ToolRegistry {
 
   public list(): readonly ToolDefinition[] {
     return Array.from(this.tools.values());
+  }
+
+  public getGovernanceSummary(): ToolGovernanceSummary {
+    return {
+      allowedTools: [...this.governance.allowedTools],
+      blockedTools: [...this.governance.blockedTools]
+    };
   }
 
   public getMetrics(): Readonly<Record<string, ToolMetrics>> {
@@ -307,6 +336,18 @@ export class ToolRegistry {
 
     metric.failures += 1;
   }
+
+  private isAllowedByGovernance(toolName: string): boolean {
+    if (this.governance.blockedTools.includes(toolName)) {
+      return false;
+    }
+
+    if (this.governance.allowedTools.length === 0) {
+      return true;
+    }
+
+    return this.governance.allowedTools.includes(toolName);
+  }
 }
 
 export function discoverTools(
@@ -423,6 +464,19 @@ function validateObjectSchema(
 
 function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeToolGovernance(
+  policy: ToolGovernancePolicy | undefined
+): ToolGovernanceSummary {
+  const normalizeList = (value: readonly string[] | undefined): readonly string[] =>
+    [...new Set((value ?? []).map((entry) => entry.trim()).filter((entry) => entry.length > 0))]
+      .sort((left, right) => left.localeCompare(right));
+
+  return {
+    allowedTools: normalizeList(policy?.allowedTools),
+    blockedTools: normalizeList(policy?.blockedTools)
+  };
 }
 
 function assertToolDefinition(

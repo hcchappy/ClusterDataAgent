@@ -212,6 +212,57 @@ describe("tool-system", () => {
     expect(registry.list()).toHaveLength(2);
   });
 
+  it("skips tools blocked by governance policy", async () => {
+    const registry = new ToolRegistry({
+      governance: {
+        blockedTools: ["upper"]
+      }
+    });
+
+    registry.register({
+      name: "upper",
+      description: "uppercases a string",
+      execute: ({ value }: { value: string }) => value.toUpperCase()
+    });
+    registry.register({
+      name: "echo",
+      description: "echoes a string",
+      execute: ({ value }: { value: string }) => value
+    });
+
+    expect(registry.list().map((tool) => tool.name)).toEqual(["echo"]);
+    expect(registry.getGovernanceSummary()).toEqual({
+      allowedTools: [],
+      blockedTools: ["upper"]
+    });
+    await expect(registry.execute("upper", { value: "ok" })).rejects.toMatchObject({
+      code: "UNKNOWN_TOOL",
+      statusCode: 404
+    });
+  });
+
+  it("registers only allowlisted tools when an allowlist is configured", async () => {
+    const registry = new ToolRegistry({
+      governance: {
+        allowedTools: ["echo"]
+      }
+    });
+
+    registry.register({
+      name: "echo",
+      description: "echoes a string",
+      execute: ({ value }: { value: string }) => value
+    });
+    registry.register({
+      name: "upper",
+      description: "uppercases a string",
+      execute: ({ value }: { value: string }) => value.toUpperCase()
+    });
+
+    expect(registry.list().map((tool) => tool.name)).toEqual(["echo"]);
+    await expect(registry.execute("echo", { value: "ok" })).resolves.toBe("ok");
+  });
+
   it("rejects discovered record entries whose key and tool name disagree", () => {
     expect(() =>
       discoverTools({

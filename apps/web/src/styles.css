@@ -754,6 +754,7 @@ h2 {
 }
 
 .tool-form select,
+.tool-input,
 .security-grid input,
 .security-grid select {
   width: 100%;
@@ -763,6 +764,42 @@ h2 {
   background: #0e131b;
   color: #e7ecf3;
   padding: 0 10px;
+}
+
+.inline-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.session-item.is-active {
+  border-color: #87a3ff;
+  background: #131c2b;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid #32415b;
+  background: #182131;
+  color: #cfe0ff;
+  font-size: 12px;
+}
+
+.session-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .tool-textarea {
@@ -878,6 +915,23 @@ h2 {
   word-break: break-word;
 }
 
+.query-cell-details {
+  display: grid;
+  gap: 8px;
+}
+
+.query-cell-details summary {
+  cursor: pointer;
+  color: #9db3ff;
+}
+
+.query-cell-pre {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #243044;
+  background: #0b1118;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -910,6 +964,35 @@ h2 {
 .recommendation-list {
   display: grid;
   gap: 10px;
+}
+
+.insight-list {
+  display: grid;
+  gap: 10px;
+}
+
+.insight-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #243044;
+  background: #10151d;
+}
+
+.insight-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.insight-heading strong {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.insight-metrics div {
+  grid-template-columns: 120px minmax(0, 1fr);
 }
 
 .chart-preview {
@@ -1091,6 +1174,10 @@ h2 {
   color: #cfd8e6;
   font-size: 12px;
   text-transform: uppercase;
+}
+
+.runtime-route-item {
+  align-items: center;
 }
 
 .kv {

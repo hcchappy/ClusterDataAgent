@@ -1,21 +1,39 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { createLogger, safeErrorMessage } from "@clusterdata/shared";
 import {
+  analyzeDatasetInsights,
+  clearAgentSessions,
   checkAccess,
+  deleteAgentSession,
   executeSqlQuery,
-  profileDataset,
+  forkAgentSession,
+  getAgentSession,
+  getMetadataInsights,
+  getOperatorRuntime,
+  getSqlQueryJob,
+  listAgentSessions,
   recommendCharts,
   requestJson,
+  searchMetadata,
+  startSqlQueryJob,
   streamChat,
+  updateAgentSession,
   validateSql,
   type AccessAction,
   type AccessDecision,
+  type AgentSessionRecord,
+  type AgentSessionSummary,
   type ChartRecommendation,
   type ChartTheme,
   type ChatStreamEvent,
   type DatasetRow,
   type DatasetProfile,
+  type DatasetInsight,
+  type MetadataCatalogInsights,
+  type MetadataSearchResult,
+  type OperatorRuntimeResponse,
+  type RuntimePublicSnapshot,
   type SecurityCheckRequest,
   type SqlQueryResult,
   type SqlValidationResult,
@@ -64,15 +82,28 @@ interface OverviewResponse {
       }
     >
   >;
+  toolGovernance?: {
+    allowedTools: readonly string[];
+    blockedTools: readonly string[];
+    maxToolResultChars: number;
+  };
   agent: {
     configured: boolean;
     endpoint: string;
     defaultModel: string;
     memoryLimit: number;
+    memoryStore?: string;
+    memoryStorePath?: string;
+    sessionCount?: number;
     maxToolCalls: number;
     streaming: boolean;
   };
+  runtime?: RuntimePublicSnapshot;
   requestSecurity?: {
+    maxSessionIdChars: number;
+    maxSessionTitleChars: number;
+    maxSessionTags: number;
+    maxSessionTagChars: number;
     maxChatMessageChars: number;
     maxSqlChars: number;
     maxDatasetRows: number;
@@ -106,6 +137,7 @@ interface ToolActivity {
 const logger = createLogger("web");
 const DEFAULT_SQL = "select o.id, c.name from cda_orders o join cda_customers c on o.customer_id = c.id limit 20";
 const DEFAULT_SQL_ROLE: UserRole = "analyst";
+const DEFAULT_SQL_PAGE_LIMIT = 50;
 const USER_ROLE_OPTIONS: readonly UserRole[] = ["admin", "analyst", "viewer"];
 const CHART_THEME_OPTIONS: readonly ChartTheme[] = ["dark", "light"];
 const DEFAULT_CHART_THEME: ChartTheme = "dark";
@@ -124,6 +156,7 @@ const DEFAULT_DATASET = JSON.stringify(
   null,
   2
 );
+const OPERATOR_API_KEY_STORAGE_KEY = "clusterdata.operator-api-key.v1";
 
 type Language = "en" | "zh";
 type ViewMode = "workbench" | "docs";
@@ -166,6 +199,7 @@ interface UiCopy {
   readonly composerPlaceholder: string;
   readonly streamingHelp: string;
   readonly working: string;
+  readonly stop: string;
   readonly send: string;
   readonly sqlGuardrail: string;
   readonly allowed: string;
@@ -193,12 +227,25 @@ interface UiCopy {
   readonly code: string;
   readonly policyMatched: string;
   readonly accessAllowedCode: string;
+  readonly metadataExplorer: string;
+  readonly metadataSearch: string;
+  readonly metadataSearchPlaceholder: string;
+  readonly metadataSearchHelp: string;
+  readonly metadataRefresh: string;
+  readonly metadataEmpty: string;
+  readonly metadataTopTables: string;
+  readonly metadataTypes: string;
+  readonly metadataRelations: string;
+  readonly metadataStarterSql: string;
+  readonly metadataSearchResults: string;
   readonly datasetProfile: string;
+  readonly analysisInsights: string;
   readonly rowsFields: (rows: number, fields: number) => string;
   readonly jsonRows: string;
   readonly datasetHelp: string;
   readonly profiling: string;
   readonly runProfile: string;
+  readonly insightsEmpty: string;
   readonly chartRecommendations: string;
   readonly chartTheme?: string;
   readonly chartThemeDark?: string;
@@ -219,6 +266,57 @@ interface UiCopy {
   readonly loadingWorkspace: string;
   readonly toolActivity: string;
   readonly toolEmpty: string;
+  readonly toolGovernance: string;
+  readonly allowedToolsSummary: string;
+  readonly blockedToolsSummary: string;
+  readonly maxToolResultCharsLabel: string;
+  readonly runtimeOps: string;
+  readonly startedAt: string;
+  readonly uptime: string;
+  readonly activeRequestsLabel: string;
+  readonly activeStreamsLabel: string;
+  readonly totalRequestsLabel: string;
+  readonly rateLimitedLabel: string;
+  readonly metadataRefreshLabel: string;
+  readonly successRequestsLabel: string;
+  readonly clientErrorsLabel: string;
+  readonly serverErrorsLabel: string;
+  readonly streamStartedLabel: string;
+  readonly streamCompletedLabel: string;
+  readonly streamAbortedLabel: string;
+  readonly streamFailedLabel: string;
+  readonly routeHotspotsLabel: string;
+  readonly sessionCountLabel: string;
+  readonly toolCountLabel: string;
+  readonly loadRuntime: string;
+  readonly runtimeUnavailable: string;
+  readonly routesEmpty: string;
+  readonly sessionAdmin: string;
+  readonly operatorApiKey: string;
+  readonly operatorApiKeyPlaceholder: string;
+  readonly operatorApiKeyHelp: string;
+  readonly loadSessions: string;
+  readonly newSession: string;
+  readonly clearSessions: string;
+  readonly activeSession: string;
+  readonly storedSessions: string;
+  readonly sessionIdLabel: string;
+  readonly sessionTitle: string;
+  readonly sessionTags: string;
+  readonly forkSource: string;
+  readonly sessionTitlePlaceholder: string;
+  readonly sessionTagsPlaceholder: string;
+  readonly saveSession: string;
+  readonly forkSession: string;
+  readonly forkSessionHelp: string;
+  readonly created: string;
+  readonly lastUpdated: string;
+  readonly messageCount: string;
+  readonly latestMessage: string;
+  readonly noSessions: string;
+  readonly continueSession: string;
+  readonly deleteSession: string;
+  readonly draftSessionHint: string;
   readonly workspaceSignals: string;
   readonly nextPriority: string;
   readonly relations: string;
@@ -232,6 +330,11 @@ interface UiCopy {
   readonly top: string;
   readonly exportCsv: string;
   readonly queryEmpty: string;
+  readonly queryPreview: string;
+  readonly queryShowingRows: (start: number, end: number, total: number) => string;
+  readonly queryNextPage: string;
+  readonly queryPreviousPage: string;
+  readonly queryLargeCell: string;
   readonly recentQueries: string;
   readonly historyStores: (count: number) => string;
   readonly historyEmpty: string;
@@ -245,10 +348,19 @@ interface UiCopy {
   readonly overviewFailedStatus: string;
   readonly responseCompleteStatus: string;
   readonly responseFailedStatus: string;
+  readonly requestCanceledStatus: string;
   readonly requestFailedStatus: string;
   readonly loadedHistoryStatus: string;
   readonly queryExportedStatus: string;
   readonly historyClearedStatus: string;
+  readonly sessionCreatedStatus: string;
+  readonly sessionsLoadedStatus: string;
+  readonly sessionLoadedStatus: string;
+  readonly sessionDeletedStatus: string;
+  readonly sessionsClearedStatus: string;
+  readonly sessionSavedStatus: string;
+  readonly sessionForkedStatus: string;
+  readonly runtimeLoadedStatus: string;
   readonly datasetArrayError: string;
   readonly streamWithModel: (model: string) => string;
   readonly prompts: readonly string[];
@@ -293,6 +405,7 @@ const UI_COPY: Record<Language, UiCopy> = {
     composerPlaceholder: "Ask the agent to validate SQL, summarize a series, or suggest a chart.",
     streamingHelp: "Streaming is powered by the `/api/chat/stream` endpoint.",
     working: "Working...",
+    stop: "Stop",
     send: "Send",
     sqlGuardrail: "SQL Guardrail",
     allowed: "allowed",
@@ -320,12 +433,25 @@ const UI_COPY: Record<Language, UiCopy> = {
     code: "Code",
     policyMatched: "policy matched",
     accessAllowedCode: "ACCESS_ALLOWED",
+    metadataExplorer: "Metadata Explorer",
+    metadataSearch: "Search Metadata",
+    metadataSearchPlaceholder: "orders, tenant, customer_id",
+    metadataSearchHelp: "Search tables, columns, and relations, then reuse starter SQL in the guardrail.",
+    metadataRefresh: "Refresh Metadata",
+    metadataEmpty: "Load the workspace summary or search metadata to explore the schema.",
+    metadataTopTables: "Top Tables",
+    metadataTypes: "Data Types",
+    metadataRelations: "Relation Hotspots",
+    metadataStarterSql: "Use Starter SQL",
+    metadataSearchResults: "Search Results",
     datasetProfile: "Dataset Profile",
+    analysisInsights: "Analysis Insights",
     rowsFields: (rows, fields) => `${rows} rows / ${fields} fields`,
     jsonRows: "JSON rows",
     datasetHelp: "Profiles field types, missing values, distributions, and quality.",
     profiling: "Profiling...",
     runProfile: "Run Profile",
+    insightsEmpty: "Profile a dataset to generate insight cards for quality, trends, breakdowns, and correlations.",
     chartRecommendations: "Chart Recommendations",
     chartTheme: "Chart Theme",
     chartThemeDark: "Dark",
@@ -346,6 +472,57 @@ const UI_COPY: Record<Language, UiCopy> = {
     loadingWorkspace: "Loading workspace summary...",
     toolActivity: "Tool Activity",
     toolEmpty: "Tool calls will appear here as the agent works.",
+    toolGovernance: "Tool Governance",
+    allowedToolsSummary: "Allowed Tools",
+    blockedToolsSummary: "Blocked Tools",
+    maxToolResultCharsLabel: "Tool Result Limit",
+    runtimeOps: "Runtime Ops",
+    startedAt: "Started At",
+    uptime: "Uptime",
+    activeRequestsLabel: "Active Requests",
+    activeStreamsLabel: "Active Streams",
+    totalRequestsLabel: "Total Requests",
+    rateLimitedLabel: "Rate Limited",
+    metadataRefreshLabel: "Metadata Refresh",
+    successRequestsLabel: "Successful",
+    clientErrorsLabel: "Client Errors",
+    serverErrorsLabel: "Server Errors",
+    streamStartedLabel: "Streams Started",
+    streamCompletedLabel: "Streams Completed",
+    streamAbortedLabel: "Streams Aborted",
+    streamFailedLabel: "Streams Failed",
+    routeHotspotsLabel: "Route Hotspots",
+    sessionCountLabel: "Session Count",
+    toolCountLabel: "Tool Count",
+    loadRuntime: "Load Runtime",
+    runtimeUnavailable: "Runtime metrics are not loaded yet.",
+    routesEmpty: "No route traffic yet.",
+    sessionAdmin: "Session Admin",
+    operatorApiKey: "Operator API Key",
+    operatorApiKeyPlaceholder: "Enter operator API key",
+    operatorApiKeyHelp: "Load, resume, and clean stored agent sessions with the operator key.",
+    loadSessions: "Load Sessions",
+    newSession: "New Session",
+    clearSessions: "Clear Sessions",
+    activeSession: "Active Session",
+    storedSessions: "Stored Sessions",
+    sessionIdLabel: "Session ID",
+    sessionTitle: "Title",
+    sessionTags: "Tags",
+    forkSource: "Forked From",
+    sessionTitlePlaceholder: "Add a session title",
+    sessionTagsPlaceholder: "finance, q2, review",
+    saveSession: "Save Session",
+    forkSession: "Fork Session",
+    forkSessionHelp: "Save a title or tags, then fork the current session for a parallel branch.",
+    created: "Created",
+    lastUpdated: "Last Updated",
+    messageCount: "Messages",
+    latestMessage: "Latest Message",
+    noSessions: "No stored sessions yet.",
+    continueSession: "Continue Session",
+    deleteSession: "Delete Session",
+    draftSessionHint: "New draft session",
     workspaceSignals: "Workspace Signals",
     nextPriority: "Next Priority",
     relations: "Relations",
@@ -359,6 +536,11 @@ const UI_COPY: Record<Language, UiCopy> = {
     top: "Top",
     exportCsv: "Export CSV",
     queryEmpty: "Query completed without returning rows.",
+    queryPreview: "Preview",
+    queryShowingRows: (start, end, total) => `Showing rows ${start}-${end} of ${total}`,
+    queryNextPage: "Next Page",
+    queryPreviousPage: "Previous Page",
+    queryLargeCell: "expand to inspect",
     recentQueries: "Recent Queries",
     historyStores: (count) => `Stores the last ${count} successful runs in this browser.`,
     historyEmpty: "Run a query to create a reusable history entry.",
@@ -373,10 +555,19 @@ const UI_COPY: Record<Language, UiCopy> = {
     overviewFailedStatus: "overview failed",
     responseCompleteStatus: "response complete",
     responseFailedStatus: "response failed",
+    requestCanceledStatus: "request canceled",
     requestFailedStatus: "request failed",
     loadedHistoryStatus: "loaded query from history",
     queryExportedStatus: "query exported",
     historyClearedStatus: "query history cleared",
+    sessionCreatedStatus: "new session ready",
+    sessionsLoadedStatus: "sessions loaded",
+    sessionLoadedStatus: "session loaded",
+    sessionDeletedStatus: "session deleted",
+    sessionsClearedStatus: "sessions cleared",
+    sessionSavedStatus: "session metadata saved",
+    sessionForkedStatus: "session forked",
+    runtimeLoadedStatus: "runtime metrics loaded",
     datasetArrayError: "Dataset input must be a JSON array",
     streamWithModel: (model) => `streaming with ${model}`,
     prompts: [
@@ -402,6 +593,7 @@ const UI_COPY: Record<Language, UiCopy> = {
         items: [
           "Ask schema-aware questions in English or Chinese; business terms for orders, customers, and events are expanded during metadata search.",
           "Streaming answers show tool activity as the agent validates SQL, profiles data, recommends charts, or checks access.",
+          "Use Stop to cancel an in-flight stream while keeping any partial answer already shown.",
           "Assistant responses support markdown headings, lists, links, and code blocks for readable analysis notes."
         ]
       },
@@ -438,7 +630,7 @@ const UI_COPY: Record<Language, UiCopy> = {
         items: [
           "Set role, action, tenant, and resource tenant to test an authorization decision.",
           "Allowed or denied decisions include policy reasons and machine-readable codes.",
-          "Security audit logs cover chat, SQL validation, SQL query, metadata refresh, and access-check flows."
+          "Security audit logs cover operator session admin, chat, SQL validation, SQL query, metadata refresh, and access-check flows."
         ]
       }
     ],
@@ -485,6 +677,12 @@ const UI_COPY: Record<Language, UiCopy> = {
         description: "Ask the agent to call tools and stream answer deltas back to the browser or terminal.",
         command:
           'curl -N -X POST http://127.0.0.1:3001/api/chat/stream -H "content-type: application/json" -d "{\\"sessionId\\":\\"demo\\",\\"message\\":\\"Validate select id from Tenant limit 20\\"}"'
+      },
+      {
+        title: "Inspect sessions",
+        description: "Read stored agent session summaries through the operator endpoints with the configured API key.",
+        command:
+          'curl http://127.0.0.1:3001/api/agent/sessions -H "x-operator-api-key: ${OPERATOR_API_KEY}"'
       }
     ],
     flowTitle: "Workflow",
@@ -558,6 +756,7 @@ const UI_COPY: Record<Language, UiCopy> = {
     composerPlaceholder: "让 Agent 校验 SQL、总结序列，或推荐图表。",
     streamingHelp: "流式输出由 `/api/chat/stream` 接口提供。",
     working: "处理中...",
+    stop: "停止",
     send: "发送",
     sqlGuardrail: "SQL 护栏",
     allowed: "允许",
@@ -585,12 +784,25 @@ const UI_COPY: Record<Language, UiCopy> = {
     code: "代码",
     policyMatched: "策略通过",
     accessAllowedCode: "ACCESS_ALLOWED",
+    metadataExplorer: "元数据探索",
+    metadataSearch: "搜索元数据",
+    metadataSearchPlaceholder: "orders, tenant, customer_id",
+    metadataSearchHelp: "搜索表、字段和关系，并把 starter SQL 直接带回 SQL 护栏。",
+    metadataRefresh: "刷新元数据",
+    metadataEmpty: "先加载工作区概览或搜索元数据，再浏览当前 schema。",
+    metadataTopTables: "重点表",
+    metadataTypes: "数据类型",
+    metadataRelations: "关系热点",
+    metadataStarterSql: "使用 Starter SQL",
+    metadataSearchResults: "搜索结果",
     datasetProfile: "数据集画像",
+    analysisInsights: "分析洞察",
     rowsFields: (rows, fields) => `${rows} 行 / ${fields} 个字段`,
     jsonRows: "JSON 行数据",
     datasetHelp: "分析字段类型、缺失值、分布和质量。",
     profiling: "画像生成中...",
     runProfile: "生成画像",
+    insightsEmpty: "先对数据集生成画像，再生成质量、趋势、分组和相关性洞察卡片。",
     chartRecommendations: "图表推荐",
     recommending: "推荐中...",
     recommendCharts: "推荐图表",
@@ -608,6 +820,57 @@ const UI_COPY: Record<Language, UiCopy> = {
     loadingWorkspace: "正在加载工作区摘要...",
     toolActivity: "工具活动",
     toolEmpty: "Agent 工作时，工具调用会显示在这里。",
+    toolGovernance: "工具治理",
+    allowedToolsSummary: "允许工具",
+    blockedToolsSummary: "禁用工具",
+    maxToolResultCharsLabel: "工具结果上限",
+    runtimeOps: "运行态运维",
+    startedAt: "启动时间",
+    uptime: "运行时长",
+    activeRequestsLabel: "活跃请求",
+    activeStreamsLabel: "活跃流",
+    totalRequestsLabel: "总请求数",
+    rateLimitedLabel: "限流次数",
+    metadataRefreshLabel: "元数据刷新",
+    successRequestsLabel: "成功请求",
+    clientErrorsLabel: "客户端错误",
+    serverErrorsLabel: "服务端错误",
+    streamStartedLabel: "已启动流",
+    streamCompletedLabel: "已完成流",
+    streamAbortedLabel: "已取消流",
+    streamFailedLabel: "失败流",
+    routeHotspotsLabel: "热点路由",
+    sessionCountLabel: "会话数",
+    toolCountLabel: "工具数",
+    loadRuntime: "加载运行态",
+    runtimeUnavailable: "运行态指标暂未加载。",
+    routesEmpty: "暂时没有路由流量。",
+    sessionAdmin: "会话管理",
+    operatorApiKey: "运营 API Key",
+    operatorApiKeyPlaceholder: "输入运营 API Key",
+    operatorApiKeyHelp: "使用运营密钥加载、续接和清理已存储的 Agent 会话。",
+    loadSessions: "加载会话",
+    newSession: "新建会话",
+    clearSessions: "清空会话",
+    activeSession: "当前会话",
+    storedSessions: "已存储会话",
+    sessionIdLabel: "会话 ID",
+    sessionTitle: "标题",
+    sessionTags: "标签",
+    forkSource: "来源会话",
+    sessionTitlePlaceholder: "添加会话标题",
+    sessionTagsPlaceholder: "finance, q2, review",
+    saveSession: "保存会话",
+    forkSession: "分叉会话",
+    forkSessionHelp: "先保存标题或标签，再从当前会话分出并行分支。",
+    created: "创建时间",
+    lastUpdated: "最近更新时间",
+    messageCount: "消息数",
+    latestMessage: "最新消息",
+    noSessions: "暂时没有已存储会话。",
+    continueSession: "继续会话",
+    deleteSession: "删除会话",
+    draftSessionHint: "新建草稿会话",
     workspaceSignals: "工作区信号",
     nextPriority: "下一优先级",
     relations: "关系",
@@ -621,6 +884,11 @@ const UI_COPY: Record<Language, UiCopy> = {
     top: "最高频",
     exportCsv: "导出 CSV",
     queryEmpty: "查询完成，但没有返回行。",
+    queryPreview: "预览",
+    queryShowingRows: (start, end, total) => `显示第 ${start}-${end} 行，共 ${total} 行`,
+    queryNextPage: "下一页",
+    queryPreviousPage: "上一页",
+    queryLargeCell: "展开查看",
     recentQueries: "最近查询",
     historyStores: (count) => `在当前浏览器中保存最近 ${count} 次成功查询。`,
     historyEmpty: "运行一次查询后会生成可复用历史记录。",
@@ -634,10 +902,19 @@ const UI_COPY: Record<Language, UiCopy> = {
     overviewFailedStatus: "概览加载失败",
     responseCompleteStatus: "回答完成",
     responseFailedStatus: "回答失败",
+    requestCanceledStatus: "已停止",
     requestFailedStatus: "请求失败",
     loadedHistoryStatus: "已从历史载入查询",
     queryExportedStatus: "查询已导出",
     historyClearedStatus: "查询历史已清空",
+    sessionCreatedStatus: "新会话已就绪",
+    sessionsLoadedStatus: "会话已加载",
+    sessionLoadedStatus: "会话已切换",
+    sessionDeletedStatus: "会话已删除",
+    sessionsClearedStatus: "会话已清空",
+    sessionSavedStatus: "会话元数据已保存",
+    sessionForkedStatus: "会话已分叉",
+    runtimeLoadedStatus: "运行态指标已加载",
     datasetArrayError: "数据集输入必须是 JSON 数组",
     streamWithModel: (model) => `正在使用 ${model} 流式输出`,
     prompts: ["总结最近 7 天的销售趋势。", "校验这个查询：select * from orders limit 20", "为按区域统计的月收入推荐图表。"],
@@ -862,9 +1139,44 @@ export function AppShell({
   isStreaming,
   errorMessage,
   statusText,
+  activeSessionId,
+  operatorApiKey,
+  operatorRuntime,
+  metadataInsights,
+  metadataQuery,
+  metadataSearchResults,
+  agentSessions,
+  selectedSession,
+  isLoadingSessions,
+  isLoadingSessionDetail,
+  isClearingSessions,
+  isLoadingRuntime,
+  isLoadingMetadata,
+  isSearchingMetadata,
+  isSavingSessionMetadata,
+  isForkingSession,
+  deletingSessionId,
+  sessionTitleValue,
+  sessionTagsValue,
   onComposerChange,
-  onSend,
+  onSubmit,
+  onStop,
   onPromptSelect,
+  onOperatorApiKeyChange,
+  onLoadRuntime,
+  onMetadataQueryChange,
+  onLoadMetadataInsights,
+  onSearchMetadata,
+  onUseMetadataStarterSql,
+  onLoadSessions,
+  onCreateSession,
+  onSelectSession,
+  onSessionTitleChange,
+  onSessionTagsChange,
+  onSaveSession,
+  onForkSession,
+  onDeleteSession,
+  onClearSessions,
   sqlValue,
   sqlRole,
   sqlResult,
@@ -876,12 +1188,14 @@ export function AppShell({
   sqlHistory,
   isRunningSql,
   onRunSql,
+  onSqlPageChange,
   onReuseSqlHistory,
   onExportSqlResult,
   onClearSqlHistory,
   datasetValue,
   datasetRows,
   datasetProfile,
+  datasetInsights,
   chartRecommendations,
   chartTheme,
   isProfilingDataset,
@@ -907,9 +1221,44 @@ export function AppShell({
   readonly isStreaming: boolean;
   readonly errorMessage: string | null;
   readonly statusText: string;
+  readonly activeSessionId: string;
+  readonly operatorApiKey: string;
+  readonly operatorRuntime: OperatorRuntimeResponse | null;
+  readonly metadataInsights: MetadataCatalogInsights | null;
+  readonly metadataQuery: string;
+  readonly metadataSearchResults: readonly MetadataSearchResult[];
+  readonly agentSessions: readonly AgentSessionSummary[];
+  readonly selectedSession: AgentSessionRecord | null;
+  readonly isLoadingSessions: boolean;
+  readonly isLoadingSessionDetail: boolean;
+  readonly isClearingSessions: boolean;
+  readonly isLoadingRuntime: boolean;
+  readonly isLoadingMetadata: boolean;
+  readonly isSearchingMetadata: boolean;
+  readonly isSavingSessionMetadata: boolean;
+  readonly isForkingSession: boolean;
+  readonly deletingSessionId: string | null;
+  readonly sessionTitleValue: string;
+  readonly sessionTagsValue: string;
   readonly onComposerChange: (value: string) => void;
-  readonly onSend: () => void;
+  readonly onSubmit: () => void;
+  readonly onStop: () => void;
   readonly onPromptSelect: (prompt: string) => void;
+  readonly onOperatorApiKeyChange: (value: string) => void;
+  readonly onLoadRuntime: () => void;
+  readonly onMetadataQueryChange: (value: string) => void;
+  readonly onLoadMetadataInsights: () => void;
+  readonly onSearchMetadata: () => void;
+  readonly onUseMetadataStarterSql: (sql: string) => void;
+  readonly onLoadSessions: () => void;
+  readonly onCreateSession: () => void;
+  readonly onSelectSession: (sessionId: string) => void;
+  readonly onSessionTitleChange: (value: string) => void;
+  readonly onSessionTagsChange: (value: string) => void;
+  readonly onSaveSession: () => void;
+  readonly onForkSession: () => void;
+  readonly onDeleteSession: (sessionId: string) => void;
+  readonly onClearSessions: () => void;
   readonly sqlValue: string;
   readonly sqlRole: UserRole;
   readonly sqlResult: SqlValidationResult | null;
@@ -921,12 +1270,14 @@ export function AppShell({
   readonly onSqlRoleChange: (role: UserRole) => void;
   readonly onValidateSql: () => void;
   readonly onRunSql: () => void;
+  readonly onSqlPageChange?: (offset: number) => void;
   readonly onReuseSqlHistory: (entry: SqlHistoryEntry) => void;
   readonly onExportSqlResult: (entry?: SqlHistoryEntry) => void;
   readonly onClearSqlHistory: () => void;
   readonly datasetValue: string;
   readonly datasetRows: readonly DatasetRow[];
   readonly datasetProfile: DatasetProfile | null;
+  readonly datasetInsights: readonly DatasetInsight[];
   readonly chartRecommendations: readonly ChartRecommendation[];
   readonly chartTheme: ChartTheme;
   readonly isProfilingDataset: boolean;
@@ -945,6 +1296,14 @@ export function AppShell({
 }): ReactElement {
   const latestUsage = getLatestUsage(messages);
   const copy = getCopy(language);
+  const publicRuntime = operatorRuntime?.runtime ?? overview?.runtime;
+  const routeHotspots = operatorRuntime?.runtime.routes ?? [];
+  const normalizedSessionTitle = sessionTitleValue.trim();
+  const normalizedSessionTags = sessionTagsValue.trim();
+  const hasSessionMetadataChanges = selectedSession
+    ? normalizedSessionTitle !== (selectedSession.title ?? "") ||
+      normalizedSessionTags !== formatSessionTags(selectedSession.tags)
+    : false;
 
   return (
     <main className="workspace-shell">
@@ -1048,7 +1407,12 @@ export function AppShell({
               className="composer"
               onSubmit={(event) => {
                 event.preventDefault();
-                onSend();
+                if (isStreaming) {
+                  onStop();
+                  return;
+                }
+
+                onSubmit();
               }}
             >
               <label className="sr-only" htmlFor="chat-composer">
@@ -1065,8 +1429,8 @@ export function AppShell({
               />
               <div className="composer-footer">
                 <p className="subtle small">{copy.streamingHelp}</p>
-                <button type="submit" className="primary-button" disabled={isStreaming}>
-                  {isStreaming ? copy.working : copy.send}
+                <button type="submit" className="primary-button">
+                  {isStreaming ? copy.stop : copy.send}
                 </button>
               </div>
             </form>
@@ -1148,6 +1512,8 @@ export function AppShell({
               <SqlQueryResultView
                 result={sqlQueryResult}
                 copy={copy}
+                isLoadingPage={isRunningSql}
+                onPageChange={onSqlPageChange}
                 onExport={() => {
                   onExportSqlResult();
                 }}
@@ -1297,6 +1663,43 @@ export function AppShell({
             {datasetProfile ? <DatasetProfileView profile={datasetProfile} copy={copy} /> : null}
           </Panel>
 
+          <Panel title={copy.analysisInsights}>
+            {datasetInsights.length > 0 ? (
+              <div className="insight-list">
+                {datasetInsights.map((insight, index) => (
+                  <article key={`${insight.kind}-${index}`} className="insight-card">
+                    <div className="insight-heading">
+                      <span className="chart-kind">{insight.kind}</span>
+                      <strong>{insight.title}</strong>
+                    </div>
+                    <p>{insight.summary}</p>
+                    {insight.fields.length > 0 ? (
+                      <div className="tag-list">
+                        {insight.fields.map((field) => (
+                          <span key={`${insight.kind}-${field}`} className="tag-pill">
+                            {field}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {insight.metrics?.length ? (
+                      <dl className="compact-kv insight-metrics">
+                        {insight.metrics.map((metric) => (
+                          <div key={`${insight.kind}-${metric.label}`}>
+                            <dt>{metric.label}</dt>
+                            <dd>{metric.value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="subtle">{copy.insightsEmpty}</p>
+            )}
+          </Panel>
+
           <Panel
             title={copy.chartRecommendations}
             actions={
@@ -1379,6 +1782,22 @@ export function AppShell({
                   </dd>
                 </div>
                 <div>
+                  <dt>Store</dt>
+                  <dd>{overview.agent.memoryStore ?? copy.notSet}</dd>
+                </div>
+                {overview.agent.memoryStorePath ? (
+                  <div>
+                    <dt>Path</dt>
+                    <dd className="mono">{overview.agent.memoryStorePath}</dd>
+                  </div>
+                ) : null}
+                {typeof overview.agent.sessionCount === "number" ? (
+                  <div>
+                    <dt>{copy.storedSessions}</dt>
+                    <dd>{overview.agent.sessionCount}</dd>
+                  </div>
+                ) : null}
+                <div>
                   <dt>{copy.tools}</dt>
                   <dd>{overview.tools.length}</dd>
                 </div>
@@ -1390,6 +1809,153 @@ export function AppShell({
               </div>
             ) : (
               <p className="subtle">{copy.loadingWorkspace}</p>
+            )}
+          </Panel>
+
+          <Panel
+            title={copy.metadataExplorer}
+            actions={
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isLoadingMetadata}
+                onClick={onLoadMetadataInsights}
+              >
+                {isLoadingMetadata ? copy.checking : copy.metadataRefresh}
+              </button>
+            }
+          >
+            <div className="tool-form">
+              <label htmlFor="metadata-search">{copy.metadataSearch}</label>
+              <div className="inline-input-row">
+                <input
+                  id="metadata-search"
+                  className="tool-input"
+                  value={metadataQuery}
+                  onChange={(event) => onMetadataQueryChange(event.target.value)}
+                  placeholder={copy.metadataSearchPlaceholder}
+                />
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={isSearchingMetadata}
+                  onClick={onSearchMetadata}
+                >
+                  {isSearchingMetadata ? copy.checking : copy.metadataSearch}
+                </button>
+              </div>
+              <p className="subtle small">{copy.metadataSearchHelp}</p>
+            </div>
+
+            {metadataSearchResults.length > 0 ? (
+              <div className="result-box">
+                <div className="history-header">
+                  <strong>{copy.metadataSearchResults}</strong>
+                  <span className="subtle small">{metadataSearchResults.length}</span>
+                </div>
+                <div className="history-list">
+                  {metadataSearchResults.map((result, index) => (
+                    <article key={`${result.type}-${result.tableName}-${result.columnName ?? index}`} className="history-item">
+                      <div className="history-copy">
+                        <strong>{result.tableName}</strong>
+                        <span className="subtle small">{result.type}</span>
+                        {result.columnName ? (
+                          <span className="subtle small">{result.columnName}</span>
+                        ) : null}
+                        {result.relation ? (
+                          <span className="subtle small mono">
+                            {result.relation.fromTable}.{result.relation.fromColumn} → {result.relation.toTable}.{result.relation.toColumn}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="button-row">
+                        <span className="token-badge">{Math.round(result.score)}</span>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => onUseMetadataStarterSql(buildMetadataStarterSql(result.tableName))}
+                        >
+                          {copy.metadataStarterSql}
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ) : metadataInsights ? (
+              <>
+                <div className="result-box">
+                  <div className="history-header">
+                    <strong>{copy.metadataTopTables}</strong>
+                    <span className="subtle small">{metadataInsights.tables.length}</span>
+                  </div>
+                  <div className="history-list">
+                    {metadataInsights.tables.map((table) => (
+                      <article key={table.tableName} className="history-item metadata-table-card">
+                        <div className="history-copy">
+                          <strong>{table.tableName}</strong>
+                          <span className="subtle small">
+                            {table.columnCount} {copy.columns} / {table.relationCount} {copy.relations}
+                          </span>
+                          <div className="tag-list">
+                            {table.sampleColumns.map((column) => (
+                              <span key={`${table.tableName}-${column.name}`} className="tag-pill">
+                                {column.name}:{column.dataType}
+                              </span>
+                            ))}
+                          </div>
+                          {table.relatedTables.length > 0 ? (
+                            <span className="subtle small">
+                              {copy.relations}: {table.relatedTables.join(", ")}
+                            </span>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => onUseMetadataStarterSql(table.starterQuery)}
+                        >
+                          {copy.metadataStarterSql}
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="result-box">
+                  <div className="history-header">
+                    <strong>{copy.metadataTypes}</strong>
+                    <span className="subtle small">{metadataInsights.dataTypes.length}</span>
+                  </div>
+                  <div className="tag-list">
+                    {metadataInsights.dataTypes.slice(0, 8).map((entry) => (
+                      <span key={entry.dataType} className="tag-pill">
+                        {entry.dataType}:{entry.count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="result-box">
+                  <div className="history-header">
+                    <strong>{copy.metadataRelations}</strong>
+                    <span className="subtle small">{metadataInsights.relationHotspots.length}</span>
+                  </div>
+                  {metadataInsights.relationHotspots.length > 0 ? (
+                    <div className="tag-list">
+                      {metadataInsights.relationHotspots.slice(0, 8).map((entry) => (
+                        <span key={entry.tableName} className="tag-pill">
+                          {entry.tableName}:{entry.relationCount}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="subtle small">{copy.none}</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="subtle small">{copy.metadataEmpty}</p>
             )}
           </Panel>
 
@@ -1411,6 +1977,380 @@ export function AppShell({
               </div>
             ) : (
               <p className="subtle">{copy.toolEmpty}</p>
+            )}
+          </Panel>
+
+          <Panel title={copy.toolGovernance}>
+            {overview?.toolGovernance ? (
+              <dl className="kv">
+                <div>
+                  <dt>{copy.allowedToolsSummary}</dt>
+                  <dd>
+                    {overview.toolGovernance.allowedTools.length > 0
+                      ? overview.toolGovernance.allowedTools.join(", ")
+                      : copy.none}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{copy.blockedToolsSummary}</dt>
+                  <dd>
+                    {overview.toolGovernance.blockedTools.length > 0
+                      ? overview.toolGovernance.blockedTools.join(", ")
+                      : copy.none}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{copy.maxToolResultCharsLabel}</dt>
+                  <dd>{overview.toolGovernance.maxToolResultChars}</dd>
+                </div>
+              </dl>
+            ) : statusText === copy.overviewFailedStatus ? (
+              <p className="subtle small">{copy.overviewFailedStatus}</p>
+            ) : (
+              <p className="subtle small">{copy.loadingWorkspace}</p>
+            )}
+          </Panel>
+
+          <Panel
+            title={copy.runtimeOps}
+            actions={
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isLoadingRuntime}
+                onClick={onLoadRuntime}
+              >
+                {isLoadingRuntime ? copy.checking : copy.loadRuntime}
+              </button>
+            }
+          >
+            {publicRuntime ? (
+              <>
+                <dl className="kv">
+                  <div>
+                    <dt>{copy.startedAt}</dt>
+                    <dd>{formatHistoryTimestamp(publicRuntime.startedAt)}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.uptime}</dt>
+                    <dd>{formatDuration(publicRuntime.uptimeMs)}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.activeRequestsLabel}</dt>
+                    <dd>{publicRuntime.activeRequests}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.activeStreamsLabel}</dt>
+                    <dd>{publicRuntime.activeChatStreams}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.totalRequestsLabel}</dt>
+                    <dd>{publicRuntime.totalRequests}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.rateLimitedLabel}</dt>
+                    <dd>{publicRuntime.rateLimitedRequests}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.metadataRefreshLabel}</dt>
+                    <dd>{formatHistoryTimestamp(publicRuntime.lastMetadataRefreshAt)}</dd>
+                  </div>
+                  {operatorRuntime ? (
+                    <>
+                      <div>
+                        <dt>{copy.sessionCountLabel}</dt>
+                        <dd>{operatorRuntime.sessionCount}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.toolCountLabel}</dt>
+                        <dd>{operatorRuntime.toolCount}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.successRequestsLabel}</dt>
+                        <dd>{operatorRuntime.runtime.statusCounts.success}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.clientErrorsLabel}</dt>
+                        <dd>{operatorRuntime.runtime.statusCounts.clientError}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.serverErrorsLabel}</dt>
+                        <dd>{operatorRuntime.runtime.statusCounts.serverError}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.streamStartedLabel}</dt>
+                        <dd>{operatorRuntime.runtime.chatStreams.started}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.streamCompletedLabel}</dt>
+                        <dd>{operatorRuntime.runtime.chatStreams.completed}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.streamAbortedLabel}</dt>
+                        <dd>{operatorRuntime.runtime.chatStreams.aborted}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.streamFailedLabel}</dt>
+                        <dd>{operatorRuntime.runtime.chatStreams.failed}</dd>
+                      </div>
+                    </>
+                  ) : null}
+                </dl>
+
+                {operatorRuntime ? (
+                  <div className="result-box">
+                    <div className="history-header">
+                      <strong>{copy.routeHotspotsLabel}</strong>
+                      <span className="subtle small">{routeHotspots.length}</span>
+                    </div>
+                    {routeHotspots.length > 0 ? (
+                      <div className="history-list">
+                        {routeHotspots.slice(0, 6).map((route) => (
+                          <article key={route.route} className="history-item runtime-route-item">
+                            <div className="history-copy">
+                              <strong className="mono">{route.route}</strong>
+                            </div>
+                            <span className="token-badge">{route.requests}</span>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="subtle small">{copy.routesEmpty}</p>
+                    )}
+                  </div>
+                ) : null}
+              </>
+            ) : statusText === copy.overviewFailedStatus ? (
+              <p className="subtle small">{copy.overviewFailedStatus}</p>
+            ) : (
+              <p className="subtle small">{copy.runtimeUnavailable}</p>
+            )}
+          </Panel>
+
+          <Panel
+            title={copy.sessionAdmin}
+            actions={
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={isLoadingSessions}
+                  onClick={onLoadSessions}
+                >
+                  {isLoadingSessions ? copy.checking : copy.loadSessions}
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={onCreateSession}
+                >
+                  {copy.newSession}
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={isClearingSessions || agentSessions.length === 0}
+                  onClick={onClearSessions}
+                >
+                  {isClearingSessions ? copy.running : copy.clearSessions}
+                </button>
+              </div>
+            }
+          >
+            <div className="tool-form">
+              <label htmlFor="operator-api-key">{copy.operatorApiKey}</label>
+              <input
+                id="operator-api-key"
+                className="tool-input"
+                type="password"
+                value={operatorApiKey}
+                onChange={(event) => onOperatorApiKeyChange(event.target.value)}
+                placeholder={copy.operatorApiKeyPlaceholder}
+                autoComplete="off"
+              />
+              <p className="subtle small">{copy.operatorApiKeyHelp}</p>
+            </div>
+
+            {overview?.requestSecurity ? (
+              <div className="result-box">
+                <dl className="compact-kv">
+                  <div>
+                    <dt>{copy.sessionIdLabel}</dt>
+                    <dd>{overview.requestSecurity.maxSessionIdChars}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.sessionTitle}</dt>
+                    <dd>{overview.requestSecurity.maxSessionTitleChars}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.sessionTags}</dt>
+                    <dd>
+                      {overview.requestSecurity.maxSessionTags} / {overview.requestSecurity.maxSessionTagChars}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            ) : null}
+
+            <div className="result-box">
+              <dl className="compact-kv">
+                <div>
+                  <dt>{copy.activeSession}</dt>
+                  <dd className="mono">{activeSessionId}</dd>
+                </div>
+                <div>
+                  <dt>{copy.messageCount}</dt>
+                  <dd>{messages.length}</dd>
+                </div>
+                <div>
+                  <dt>{copy.created}</dt>
+                  <dd>{selectedSession ? formatHistoryTimestamp(selectedSession.createdAt) : copy.draftSessionHint}</dd>
+                </div>
+                <div>
+                  <dt>{copy.lastUpdated}</dt>
+                  <dd>{selectedSession ? formatHistoryTimestamp(selectedSession.updatedAt) : copy.draftSessionHint}</dd>
+                </div>
+              </dl>
+            </div>
+
+            {selectedSession ? (
+              <div className="result-box">
+                <dl className="compact-kv">
+                  <div>
+                    <dt>{copy.sessionIdLabel}</dt>
+                    <dd className="mono">{selectedSession.sessionId}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.sessionTitle}</dt>
+                    <dd>{selectedSession.title ?? copy.none}</dd>
+                  </div>
+                  <div>
+                    <dt>{copy.sessionTags}</dt>
+                    <dd>{selectedSession.tags?.length ? selectedSession.tags.join(", ") : copy.none}</dd>
+                  </div>
+                  {selectedSession.forkedFromSessionId ? (
+                    <div>
+                      <dt>{copy.forkSource}</dt>
+                      <dd className="mono">{selectedSession.forkedFromSessionId}</dd>
+                    </div>
+                  ) : null}
+                  <div>
+                    <dt>{copy.latestMessage}</dt>
+                    <dd>{selectedSession.lastMessage?.content ?? copy.none}</dd>
+                  </div>
+                </dl>
+              </div>
+            ) : null}
+
+            <div className="tool-form">
+              <label htmlFor="session-title-input">{copy.sessionTitle}</label>
+              <input
+                id="session-title-input"
+                className="tool-input"
+                value={sessionTitleValue}
+                onChange={(event) => onSessionTitleChange(event.target.value)}
+                placeholder={copy.sessionTitlePlaceholder}
+                disabled={!selectedSession || isSavingSessionMetadata || isForkingSession}
+              />
+              <label htmlFor="session-tags-input">{copy.sessionTags}</label>
+              <input
+                id="session-tags-input"
+                className="tool-input"
+                value={sessionTagsValue}
+                onChange={(event) => onSessionTagsChange(event.target.value)}
+                placeholder={copy.sessionTagsPlaceholder}
+                disabled={!selectedSession || isSavingSessionMetadata || isForkingSession}
+              />
+              <div className="tool-footer">
+                <p className="subtle small">{copy.forkSessionHelp}</p>
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!selectedSession || !hasSessionMetadataChanges || isSavingSessionMetadata}
+                    onClick={onSaveSession}
+                  >
+                    {isSavingSessionMetadata ? copy.running : copy.saveSession}
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={!selectedSession || isForkingSession || isSavingSessionMetadata}
+                    onClick={onForkSession}
+                  >
+                    {isForkingSession ? copy.running : copy.forkSession}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {agentSessions.length > 0 ? (
+              <div className="history-list">
+                {agentSessions.map((session) => {
+                  const isSelected = session.sessionId === activeSessionId;
+
+                  return (
+                    <article
+                      key={session.sessionId}
+                      className={`history-item session-item ${isSelected ? "is-active" : ""}`}
+                    >
+                      <div className="history-copy">
+                        <strong>{session.title ?? session.sessionId}</strong>
+                        <span className="subtle small mono">{session.sessionId}</span>
+                        <span className="subtle small">
+                          {session.messageCount} {copy.messages}
+                        </span>
+                        {session.tags?.length ? (
+                          <div className="tag-list">
+                            {session.tags.map((tag) => (
+                              <span key={`${session.sessionId}-${tag}`} className="tag-pill">
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {session.forkedFromSessionId ? (
+                          <span className="subtle small">
+                            {copy.forkSource}: {session.forkedFromSessionId}
+                          </span>
+                        ) : null}
+                        <span className="subtle small">
+                          {copy.lastUpdated}: {formatHistoryTimestamp(session.updatedAt)}
+                        </span>
+                        {session.lastMessage?.content ? (
+                          <span className="subtle small session-preview">
+                            {session.lastMessage.content}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="button-row">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={isLoadingSessionDetail}
+                          onClick={() => onSelectSession(session.sessionId)}
+                        >
+                          {isLoadingSessionDetail && isSelected
+                            ? copy.checking
+                            : copy.continueSession}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={deletingSessionId === session.sessionId}
+                          onClick={() => onDeleteSession(session.sessionId)}
+                        >
+                          {deletingSessionId === session.sessionId
+                            ? copy.running
+                            : copy.deleteSession}
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="subtle small">{copy.noSessions}</p>
             )}
           </Panel>
 
@@ -1601,12 +2541,85 @@ function DatasetProfileView({
 function SqlQueryResultView({
   result,
   copy,
+  isLoadingPage,
+  onPageChange,
   onExport
 }: {
   readonly result: SqlQueryResult;
   readonly copy: UiCopy;
+  readonly isLoadingPage?: boolean;
+  readonly onPageChange?: (offset: number) => void;
   readonly onExport: () => void;
 }): ReactElement {
+  const handlePageChange = onPageChange;
+  const isServerPaged = Boolean(result.page && handlePageChange);
+
+  if (isServerPaged && result.page && handlePageChange) {
+    const startRowNumber = result.rows.length === 0 ? 0 : result.page.offset + 1;
+    const endRowNumber = result.page.offset + result.rows.length;
+    const previousOffset = Math.max(result.page.offset - result.page.limit, 0);
+    const nextOffset = result.page.offset + result.page.returnedRows;
+
+    return (
+      <div className="result-box">
+        <div className="query-summary-row">
+          <div className="query-summary">
+            <span>{result.rowCount} rows</span>
+            <span>{result.columns.length} columns</span>
+            <span>{result.durationMs} ms</span>
+            <span>{`${copy.queryPreview} ${result.page.returnedRows}/${result.rowCount}`}</span>
+          </div>
+          <div className="button-row">
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={result.page.offset === 0 || isLoadingPage}
+              onClick={() => {
+                handlePageChange(previousOffset);
+              }}
+            >
+              {copy.queryPreviousPage}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={!result.page.hasMore || isLoadingPage}
+              onClick={() => {
+                handlePageChange(nextOffset);
+              }}
+            >
+              {copy.queryNextPage}
+            </button>
+            <button type="button" className="ghost-button" onClick={onExport}>
+              {copy.exportCsv}
+            </button>
+          </div>
+        </div>
+        {result.rows.length > 0 ? (
+          <p className="subtle small">
+            {copy.queryShowingRows(startRowNumber, endRowNumber, result.rowCount)}
+          </p>
+        ) : null}
+        {renderSqlResultTable(result, copy)}
+      </div>
+    );
+  }
+
+  const pageSize = Math.max(
+    1,
+    Math.min(
+      (result.page?.limit ?? result.rows.length) || 1,
+      result.rows.length || 1
+    )
+  );
+  const [pageIndex, setPageIndex] = useState(0);
+  const totalPages = Math.max(1, Math.ceil(result.rows.length / pageSize));
+  const normalizedPageIndex = Math.min(pageIndex, totalPages - 1);
+  const startIndex = normalizedPageIndex * pageSize;
+  const pageRows = result.rows.slice(startIndex, startIndex + pageSize);
+  const startRowNumber = result.rows.length === 0 ? 0 : startIndex + 1;
+  const endRowNumber = startIndex + pageRows.length;
+
   return (
     <div className="result-box">
       <div className="query-summary-row">
@@ -1614,35 +2627,80 @@ function SqlQueryResultView({
           <span>{result.rowCount} rows</span>
           <span>{result.columns.length} columns</span>
           <span>{result.durationMs} ms</span>
+          {result.page ? (
+            <span>{`${copy.queryPreview} ${result.page.returnedRows}/${result.rowCount}`}</span>
+          ) : null}
         </div>
-        <button type="button" className="ghost-button" onClick={onExport}>
-          {copy.exportCsv}
-        </button>
+        <div className="button-row">
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={normalizedPageIndex === 0}
+            onClick={() => {
+              setPageIndex((current) => Math.max(current - 1, 0));
+            }}
+          >
+            {copy.queryPreviousPage}
+          </button>
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={normalizedPageIndex >= totalPages - 1}
+            onClick={() => {
+              setPageIndex((current) => Math.min(current + 1, totalPages - 1));
+            }}
+          >
+            {copy.queryNextPage}
+          </button>
+          <button type="button" className="ghost-button" onClick={onExport}>
+            {copy.exportCsv}
+          </button>
+        </div>
       </div>
-      {result.rows.length === 0 ? (
-        <p className="subtle small">{copy.queryEmpty}</p>
-      ) : (
-        <div className="result-table-wrap">
-          <table className="result-table">
-            <thead>
-              <tr>
-                {result.columns.map((column) => (
-                  <th key={column}>{column}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {result.rows.map((row, index) => (
-                <tr key={`row-${index}`}>
-                  {result.columns.map((column) => (
-                    <td key={`${index}-${column}`}>{formatQueryCell(row[column])}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {pageRows.length > 0 ? (
+        <p className="subtle small">
+          {copy.queryShowingRows(startRowNumber, endRowNumber, result.rowCount)}
+        </p>
+      ) : null}
+      {renderSqlResultTable(
+        {
+          ...result,
+          rows: pageRows
+        },
+        copy
       )}
+    </div>
+  );
+}
+
+function renderSqlResultTable(
+  result: SqlQueryResult,
+  copy: UiCopy
+): ReactElement {
+  if (result.rows.length === 0) {
+    return <p className="subtle small">{copy.queryEmpty}</p>;
+  }
+
+  return (
+    <div className="result-table-wrap">
+      <table className="result-table">
+        <thead>
+          <tr>
+            {result.columns.map((column) => (
+              <th key={column}>{column}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {result.rows.map((row, index) => (
+            <tr key={`row-${index}`}>
+              {result.columns.map((column) => (
+                <td key={`${index}-${column}`}>{renderQueryCell(row[column], copy)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -1737,6 +2795,22 @@ function formatQueryCell(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function renderQueryCell(value: unknown, copy: UiCopy): ReactElement {
+  const formatted = formatQueryCell(value);
+  const shouldCollapse = formatted.length > 160 || formatted.includes("\n");
+
+  if (!shouldCollapse) {
+    return <>{formatted}</>;
+  }
+
+  return (
+    <details className="query-cell-details">
+      <summary>{copy.queryLargeCell}</summary>
+      <pre className="query-cell-pre">{formatted}</pre>
+    </details>
+  );
+}
+
 function getLatestUsage(messages: readonly ChatMessage[]): UsageSummary | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const usage = messages[index]?.usage;
@@ -1749,24 +2823,121 @@ function getLatestUsage(messages: readonly ChatMessage[]): UsageSummary | undefi
   return undefined;
 }
 
+function compareSessionsByUpdatedAt(
+  left: AgentSessionSummary,
+  right: AgentSessionSummary
+): number {
+  return right.updatedAt.localeCompare(left.updatedAt) || left.sessionId.localeCompare(right.sessionId);
+}
+
+function normalizeOptionalSessionText(value: string): string | null {
+  const trimmed = value.trim();
+
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseSessionTagsInput(value: string): readonly string[] | null {
+  const tags = [...new Set(value.split(",").map((tag) => tag.trim()).filter((tag) => tag.length > 0))];
+
+  return tags.length > 0 ? tags : null;
+}
+
+function formatSessionTags(tags: readonly string[] | undefined): string {
+  return tags?.join(", ") ?? "";
+}
+
+function toSessionSummary(session: AgentSessionRecord): AgentSessionSummary {
+  return {
+    sessionId: session.sessionId,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    messageCount: session.messageCount,
+    ...(session.title ? { title: session.title } : {}),
+    ...(session.tags?.length ? { tags: [...session.tags] } : {}),
+    ...(session.forkedFromSessionId
+      ? { forkedFromSessionId: session.forkedFromSessionId }
+      : {}),
+    ...(session.lastMessage ? { lastMessage: session.lastMessage } : {})
+  };
+}
+
+function formatDuration(value: number): string {
+  const totalSeconds = Math.max(Math.floor(value / 1000), 0);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function buildMetadataStarterSql(tableName: string): string {
+  return `select * from ${tableName} limit 20`;
+}
+
+function createSessionId(): string {
+  return `web-${globalThis.crypto?.randomUUID?.() ?? `session-${Date.now()}`}`;
+}
+
+function createWelcomeMessage(language: Language): ChatMessage {
+  return {
+    id: "welcome",
+    role: "assistant",
+    content: getCopy(language).welcomeMessage,
+    status: "complete"
+  };
+}
+
+function createDraftMessages(language: Language): ChatMessage[] {
+  return [createWelcomeMessage(language)];
+}
+
+function toChatMessages(session: AgentSessionRecord): ChatMessage[] {
+  return session.messages.map((message, index) => ({
+    id: `${session.sessionId}-${message.role}-${index}`,
+    role: message.role,
+    content: message.content,
+    status: "complete"
+  }));
+}
+
 export default function App(): ReactElement {
   const [language, setLanguage] = useState<Language>("zh");
   const [activeView, setActiveView] = useState<ViewMode>("workbench");
   const copy = getCopy(language);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: getCopy("zh").welcomeMessage,
-      status: "complete"
-    }
-  ]);
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => createSessionId());
+  const [messages, setMessages] = useState<ChatMessage[]>(() => createDraftMessages("zh"));
   const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
   const [composerValue, setComposerValue] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusText, setStatusText] = useState(copy.loadingOverview);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [operatorApiKey, setOperatorApiKey] = useState("");
+  const [operatorRuntime, setOperatorRuntime] = useState<OperatorRuntimeResponse | null>(null);
+  const [metadataInsights, setMetadataInsights] = useState<MetadataCatalogInsights | null>(null);
+  const [metadataQuery, setMetadataQuery] = useState("");
+  const [metadataSearchResults, setMetadataSearchResults] = useState<MetadataSearchResult[]>([]);
+  const [agentSessions, setAgentSessions] = useState<AgentSessionSummary[]>([]);
+  const [selectedSession, setSelectedSession] = useState<AgentSessionRecord | null>(null);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [isLoadingSessionDetail, setIsLoadingSessionDetail] = useState(false);
+  const [isClearingSessions, setIsClearingSessions] = useState(false);
+  const [isLoadingRuntime, setIsLoadingRuntime] = useState(false);
+  const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
+  const [isSearchingMetadata, setIsSearchingMetadata] = useState(false);
+  const [isSavingSessionMetadata, setIsSavingSessionMetadata] = useState(false);
+  const [isForkingSession, setIsForkingSession] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [sessionTitleValue, setSessionTitleValue] = useState("");
+  const [sessionTagsValue, setSessionTagsValue] = useState("");
   const [sqlValue, setSqlValue] = useState(DEFAULT_SQL);
   const [sqlRole, setSqlRole] = useState<UserRole>(DEFAULT_SQL_ROLE);
   const [sqlResult, setSqlResult] = useState<SqlValidationResult | null>(null);
@@ -1777,6 +2948,7 @@ export default function App(): ReactElement {
   const [datasetValue, setDatasetValue] = useState(DEFAULT_DATASET);
   const [datasetRows, setDatasetRows] = useState<DatasetRow[]>([]);
   const [datasetProfile, setDatasetProfile] = useState<DatasetProfile | null>(null);
+  const [datasetInsights, setDatasetInsights] = useState<DatasetInsight[]>([]);
   const [chartRecommendations, setChartRecommendations] = useState<ChartRecommendation[]>([]);
   const [chartTheme, setChartTheme] = useState<ChartTheme>(DEFAULT_CHART_THEME);
   const [isProfilingDataset, setIsProfilingDataset] = useState(false);
@@ -1785,23 +2957,55 @@ export default function App(): ReactElement {
     useState<SecurityCheckRequest>(DEFAULT_SECURITY_CHECK);
   const [securityDecision, setSecurityDecision] = useState<AccessDecision | null>(null);
   const [isCheckingAccess, setIsCheckingAccess] = useState(false);
-  const sessionId = useMemo(
-    () => `web-${globalThis.crypto?.randomUUID?.() ?? `session-${Date.now()}`}`,
-    []
-  );
+  const [chatAbortController, setChatAbortController] = useState<AbortController | null>(null);
 
   useEffect(() => {
-    setMessages((current) =>
-      current.map((message) =>
+    setMessages((current) => {
+      if (current.length === 1 && current[0]?.id === "welcome" && !selectedSession) {
+        return createDraftMessages(language);
+      }
+
+      return current.map((message) =>
         message.id === "welcome"
           ? {
               ...message,
               content: copy.welcomeMessage
             }
           : message
-      )
-    );
-  }, [copy.welcomeMessage]);
+      );
+    });
+  }, [copy.welcomeMessage, language, selectedSession]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return;
+    }
+
+    const storedKey = window.localStorage.getItem(OPERATOR_API_KEY_STORAGE_KEY) ?? "";
+
+    if (storedKey.length > 0) {
+      logger.info("operator api key restored");
+      setOperatorApiKey(storedKey);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return;
+    }
+
+    if (operatorApiKey.trim().length === 0) {
+      window.localStorage.removeItem(OPERATOR_API_KEY_STORAGE_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(OPERATOR_API_KEY_STORAGE_KEY, operatorApiKey);
+  }, [operatorApiKey]);
+
+  useEffect(() => {
+    setSessionTitleValue(selectedSession?.title ?? "");
+    setSessionTagsValue(formatSessionTags(selectedSession?.tags));
+  }, [selectedSession]);
 
   useEffect(() => {
     const loadOverview = async (): Promise<void> => {
@@ -1821,6 +3025,31 @@ export default function App(): ReactElement {
   }, [copy.connectedStatus, copy.credentialsStatus, copy.overviewFailedStatus]);
 
   useEffect(() => {
+    const loadMetadataExplorer = async (): Promise<void> => {
+      setIsLoadingMetadata(true);
+
+      try {
+        const insights = await getMetadataInsights();
+
+        setMetadataInsights(insights);
+        logger.info("metadata insights loaded", {
+          tableCount: insights.tables.length,
+          typeCount: insights.dataTypes.length
+        });
+      } catch (error) {
+        const message = safeErrorMessage(error);
+
+        logger.error("failed to load metadata insights", { error: message });
+        setErrorMessage(message);
+      } finally {
+        setIsLoadingMetadata(false);
+      }
+    };
+
+    void loadMetadataExplorer();
+  }, []);
+
+  useEffect(() => {
     try {
       const history = readStoredSqlHistory();
 
@@ -1834,6 +3063,371 @@ export default function App(): ReactElement {
       setErrorMessage(message);
     }
   }, []);
+
+  const updateSessionInventoryCount = (sessionCount: number): void => {
+    setOverview((current) =>
+      current
+        ? {
+            ...current,
+            agent: {
+              ...current.agent,
+              sessionCount
+            }
+          }
+        : current
+    );
+
+    setOperatorRuntime((current) =>
+      current
+        ? {
+            ...current,
+            sessionCount
+          }
+        : current
+    );
+  };
+
+  const upsertSessionSummary = (session: AgentSessionRecord): void => {
+    setAgentSessions((current) => {
+      const next = [
+        toSessionSummary(session),
+        ...current.filter((entry) => entry.sessionId !== session.sessionId)
+      ].sort(compareSessionsByUpdatedAt);
+
+      updateSessionInventoryCount(next.length);
+      return next;
+    });
+  };
+
+  const requireOperatorRequestOptions = (): { apiKey: string } => {
+    const apiKey = operatorApiKey.trim();
+
+    if (apiKey.length === 0) {
+      throw new Error(`${copy.operatorApiKey} is required`);
+    }
+
+    return { apiKey };
+  };
+
+  const handleLoadRuntime = async (): Promise<void> => {
+    setIsLoadingRuntime(true);
+    setErrorMessage(null);
+
+    try {
+      const runtime = await getOperatorRuntime(requireOperatorRequestOptions());
+
+      setOperatorRuntime(runtime);
+      logger.info("operator runtime loaded", {
+        activeRequests: runtime.runtime.activeRequests,
+        sessionCount: runtime.sessionCount,
+        toolCount: runtime.toolCount
+      });
+      setStatusText(copy.runtimeLoadedStatus);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to load operator runtime", { error: message });
+      setErrorMessage(message);
+    } finally {
+      setIsLoadingRuntime(false);
+    }
+  };
+
+  const handleLoadMetadataInsights = async (): Promise<void> => {
+    setIsLoadingMetadata(true);
+    setErrorMessage(null);
+
+    try {
+      const insights = await getMetadataInsights();
+
+      setMetadataInsights(insights);
+      setMetadataSearchResults([]);
+      logger.info("metadata insights refreshed", {
+        tableCount: insights.tables.length,
+        relationHotspots: insights.relationHotspots.length
+      });
+      setStatusText(copy.metadataRefresh);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to refresh metadata insights", { error: message });
+      setErrorMessage(message);
+    } finally {
+      setIsLoadingMetadata(false);
+    }
+  };
+
+  const handleSearchMetadata = async (): Promise<void> => {
+    const query = metadataQuery.trim();
+
+    if (query.length === 0) {
+      return;
+    }
+
+    setIsSearchingMetadata(true);
+    setErrorMessage(null);
+
+    try {
+      const results = [...(await searchMetadata(query))];
+
+      setMetadataSearchResults(results);
+      logger.info("metadata search completed", {
+        query,
+        resultCount: results.length
+      });
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("metadata search failed", {
+        error: message,
+        query
+      });
+      setErrorMessage(message);
+    } finally {
+      setIsSearchingMetadata(false);
+    }
+  };
+
+  const handleCreateSession = (): void => {
+    if (isStreaming) {
+      chatAbortController?.abort();
+    }
+
+    const nextSessionId = createSessionId();
+
+    setActiveSessionId(nextSessionId);
+    setSelectedSession(null);
+    setMessages(createDraftMessages(language));
+    setToolActivity([]);
+    setComposerValue("");
+    setSessionTitleValue("");
+    setSessionTagsValue("");
+    setErrorMessage(null);
+    setStatusText(copy.sessionCreatedStatus);
+    logger.info("draft session created", {
+      sessionId: nextSessionId
+    });
+  };
+
+  const handleLoadSessions = async (preserveStatus = false): Promise<void> => {
+    setIsLoadingSessions(true);
+    setErrorMessage(null);
+
+    try {
+      const options = requireOperatorRequestOptions();
+      const sessions = [...(await listAgentSessions(options))];
+
+      setAgentSessions(sessions);
+      updateSessionInventoryCount(sessions.length);
+
+      if (!sessions.some((session) => session.sessionId === activeSessionId)) {
+        setSelectedSession(null);
+      }
+
+      logger.info("agent sessions loaded", {
+        sessionCount: sessions.length
+      });
+
+      if (!preserveStatus) {
+        setStatusText(copy.sessionsLoadedStatus);
+      }
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to load agent sessions", { error: message });
+      setErrorMessage(message);
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  };
+
+  const handleSelectSession = async (
+    sessionId: string,
+    preserveStatus = false
+  ): Promise<void> => {
+    if (isStreaming) {
+      chatAbortController?.abort();
+    }
+
+    setIsLoadingSessionDetail(true);
+    setErrorMessage(null);
+
+    try {
+      const session = await getAgentSession(sessionId, requireOperatorRequestOptions());
+
+      setActiveSessionId(session.sessionId);
+      setSelectedSession(session);
+      setMessages(toChatMessages(session));
+      setToolActivity([]);
+      setComposerValue("");
+      logger.info("agent session loaded", {
+        sessionId: session.sessionId,
+        messageCount: session.messageCount
+      });
+
+      if (!preserveStatus) {
+        setStatusText(copy.sessionLoadedStatus);
+      }
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to load agent session", {
+        error: message,
+        sessionId
+      });
+      setErrorMessage(message);
+    } finally {
+      setIsLoadingSessionDetail(false);
+    }
+  };
+
+  const handleDeleteSession = async (sessionId: string): Promise<void> => {
+    setDeletingSessionId(sessionId);
+    setErrorMessage(null);
+
+    try {
+      const result = await deleteAgentSession(sessionId, requireOperatorRequestOptions());
+
+      setAgentSessions((current) => {
+        const next = current.filter((session) => session.sessionId !== sessionId);
+
+        updateSessionInventoryCount(next.length);
+        return next;
+      });
+
+      if (selectedSession?.sessionId === sessionId) {
+        setSelectedSession(null);
+      }
+
+      logger.info("agent session deleted", {
+        sessionId: result.sessionId,
+        deleted: result.deleted
+      });
+
+      if (activeSessionId === sessionId) {
+        handleCreateSession();
+      }
+
+      setStatusText(copy.sessionDeletedStatus);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to delete agent session", {
+        error: message,
+        sessionId
+      });
+      setErrorMessage(message);
+    } finally {
+      setDeletingSessionId(null);
+    }
+  };
+
+  const handleClearSessions = async (): Promise<void> => {
+    setIsClearingSessions(true);
+    setErrorMessage(null);
+
+    try {
+      const result = await clearAgentSessions(requireOperatorRequestOptions());
+
+      setAgentSessions([]);
+      setSelectedSession(null);
+      updateSessionInventoryCount(0);
+      logger.info("agent sessions cleared", {
+        deletedCount: result.deletedCount
+      });
+      handleCreateSession();
+      setStatusText(copy.sessionsClearedStatus);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to clear agent sessions", { error: message });
+      setErrorMessage(message);
+    } finally {
+      setIsClearingSessions(false);
+    }
+  };
+
+  const handleSaveSession = async (): Promise<void> => {
+    if (!selectedSession) {
+      return;
+    }
+
+    setIsSavingSessionMetadata(true);
+    setErrorMessage(null);
+
+    try {
+      const session = await updateAgentSession(
+        selectedSession.sessionId,
+        {
+          title: normalizeOptionalSessionText(sessionTitleValue),
+          tags: parseSessionTagsInput(sessionTagsValue)
+        },
+        requireOperatorRequestOptions()
+      );
+
+      setSelectedSession(session);
+      upsertSessionSummary(session);
+      logger.info("agent session metadata saved", {
+        sessionId: session.sessionId,
+        hasTitle: Boolean(session.title),
+        tagCount: session.tags?.length ?? 0
+      });
+      setStatusText(copy.sessionSavedStatus);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to save agent session metadata", {
+        error: message,
+        sessionId: selectedSession.sessionId
+      });
+      setErrorMessage(message);
+    } finally {
+      setIsSavingSessionMetadata(false);
+    }
+  };
+
+  const handleForkSession = async (): Promise<void> => {
+    if (!selectedSession) {
+      return;
+    }
+
+    setIsForkingSession(true);
+    setErrorMessage(null);
+
+    try {
+      const result = await forkAgentSession(
+        selectedSession.sessionId,
+        {
+          title: normalizeOptionalSessionText(sessionTitleValue),
+          tags: parseSessionTagsInput(sessionTagsValue)
+        },
+        requireOperatorRequestOptions()
+      );
+
+      setActiveSessionId(result.session.sessionId);
+      setSelectedSession(result.session);
+      setMessages(toChatMessages(result.session));
+      setToolActivity([]);
+      setComposerValue("");
+      upsertSessionSummary(result.session);
+      logger.info("agent session forked", {
+        sourceSessionId: result.sourceSessionId,
+        sessionId: result.session.sessionId,
+        messageCount: result.session.messageCount
+      });
+      setStatusText(copy.sessionForkedStatus);
+    } catch (error) {
+      const message = safeErrorMessage(error);
+
+      logger.error("failed to fork agent session", {
+        error: message,
+        sessionId: selectedSession.sessionId
+      });
+      setErrorMessage(message);
+    } finally {
+      setIsForkingSession(false);
+    }
+  };
 
   const appendUserMessage = (content: string): string => {
     const assistantId = `assistant-${Date.now()}`;
@@ -1940,21 +3534,45 @@ export default function App(): ReactElement {
     setErrorMessage(null);
     setComposerValue("");
     setIsStreaming(true);
+    const abortController = new AbortController();
+    setChatAbortController(abortController);
     const assistantId = appendUserMessage(content);
 
     try {
       await streamChat(
         {
-          sessionId,
+          sessionId: activeSessionId,
           message: content,
           model: overview?.agent.defaultModel
         },
         (event) => {
           applyStreamEvent(assistantId, event);
+        },
+        {
+          signal: abortController.signal
         }
       );
     } catch (error) {
       const message = safeErrorMessage(error);
+
+      if (abortController.signal.aborted) {
+        logger.info("chat request aborted", { sessionId: activeSessionId });
+        setStatusText(copy.requestCanceledStatus);
+        setMessages((current) =>
+          current.map((entry) =>
+            entry.id === assistantId
+              ? {
+                  ...entry,
+                  content:
+                    entry.content.length > 0 ? entry.content : copy.requestCanceledStatus,
+                  status: "complete"
+                }
+              : entry
+          )
+        );
+        return;
+      }
+
       logger.error("chat request failed", { error: message });
       setErrorMessage(message);
       setMessages((current) =>
@@ -1970,8 +3588,18 @@ export default function App(): ReactElement {
       );
       setStatusText(copy.requestFailedStatus);
     } finally {
+      if (operatorApiKey.trim().length > 0) {
+        await handleLoadSessions(true);
+        await handleSelectSession(activeSessionId, true);
+      }
+
+      setChatAbortController(null);
       setIsStreaming(false);
     }
+  };
+
+  const handleStopStreaming = (): void => {
+    chatAbortController?.abort();
   };
 
   const handleValidateSql = async (): Promise<void> => {
@@ -2003,16 +3631,35 @@ export default function App(): ReactElement {
     setErrorMessage(null);
 
     try {
-      const result = await executeSqlQuery(sqlValue, { role: sqlRole });
-      const nextEntry = createSqlHistoryEntry(sqlValue, result);
+      const job = await startSqlQueryJob(sqlValue, {
+        role: sqlRole
+      });
+      const completedJob =
+        job.status === "completed" || job.status === "failed"
+          ? job
+          : await waitForSqlQueryJob(job.jobId);
+
+      if (completedJob.status === "failed") {
+        throw new Error(completedJob.error?.message ?? "SQL query job failed");
+      }
+
+      const result = await executeSqlQuery(sqlValue, {
+        role: sqlRole,
+        pageLimit: DEFAULT_SQL_PAGE_LIMIT
+      });
+      const nextEntry = createSqlHistoryEntry(sqlValue, result, {
+        role: sqlRole
+      });
 
       setSqlResult(result.validation);
       setSqlQueryResult(result);
       logger.info("sql query completed", {
+        jobId: completedJob.jobId,
         role: sqlRole,
         rowCount: result.rowCount,
         columnCount: result.columns.length,
-        durationMs: result.durationMs
+        durationMs: result.durationMs,
+        cacheHit: result.cache?.hit ?? false
       });
       setSqlHistory((current) => {
         const next = [...upsertSqlHistory(current, nextEntry)];
@@ -2029,29 +3676,76 @@ export default function App(): ReactElement {
     }
   };
 
+  const handleLoadSqlPage = async (offset: number): Promise<void> => {
+    if (!sqlQueryResult) {
+      return;
+    }
+
+    setIsRunningSql(true);
+    setErrorMessage(null);
+
+    try {
+      const result = await executeSqlQuery(sqlValue, {
+        role: sqlRole,
+        offset,
+        pageLimit: sqlQueryResult.page?.limit ?? DEFAULT_SQL_PAGE_LIMIT
+      });
+
+      setSqlResult(result.validation);
+      setSqlQueryResult(result);
+      logger.info("sql query page loaded", {
+        role: sqlRole,
+        offset: result.page?.offset ?? offset,
+        pageLimit: result.page?.limit ?? sqlQueryResult.page?.limit ?? DEFAULT_SQL_PAGE_LIMIT,
+        returnedRows: result.page?.returnedRows ?? result.rows.length,
+        rowCount: result.rowCount,
+        cacheHit: result.cache?.hit ?? false
+      });
+    } catch (error) {
+      const message = safeErrorMessage(error);
+      logger.error("sql query page failed", { error: message, offset });
+      setErrorMessage(message);
+    } finally {
+      setIsRunningSql(false);
+    }
+  };
+
   const handleReuseSqlHistory = (entry: SqlHistoryEntry): void => {
     setSqlValue(entry.sql);
+    if (entry.role) {
+      setSqlRole(entry.role);
+    }
     setSqlResult(entry.result.validation);
     setSqlQueryResult(entry.result);
     logger.info("sql history entry reused", {
       entryId: entry.id,
+      role: entry.role ?? sqlRole,
       rowCount: entry.result.rowCount
     });
     setStatusText(copy.loadedHistoryStatus);
   };
 
-  const handleExportSqlResult = (entry?: SqlHistoryEntry): void => {
-    const result = entry?.result ?? sqlQueryResult;
+  const handleExportSqlResult = async (entry?: SqlHistoryEntry): Promise<void> => {
+    let result = entry?.result ?? sqlQueryResult;
 
     if (!result) {
       return;
     }
 
     try {
+      const needsFullExport = shouldLoadFullSqlExport(result);
+
+      if (needsFullExport) {
+        result = await executeSqlQuery(entry?.sql ?? sqlValue, {
+          role: entry?.role ?? sqlRole
+        });
+      }
+
       exportSqlResultToCsv(result, entry?.executedAt);
       logger.info("sql result exported", {
         rowCount: result.rowCount,
-        columnCount: result.columns.length
+        columnCount: result.columns.length,
+        usedCachedPage: needsFullExport
       });
       setStatusText(copy.queryExportedStatus);
       setErrorMessage(null);
@@ -2080,11 +3774,19 @@ export default function App(): ReactElement {
         throw new Error(copy.datasetArrayError);
       }
 
-      const profile = await profileDataset(parsedRows as Readonly<Record<string, unknown>>[]);
+      const result = await analyzeDatasetInsights(
+        parsedRows as Readonly<Record<string, unknown>>[]
+      );
 
       setDatasetRows(parsedRows as DatasetRow[]);
-      setDatasetProfile(profile);
+      setDatasetProfile(result.profile);
+      setDatasetInsights([...result.insights]);
       setChartRecommendations([]);
+      logger.info("dataset insights loaded", {
+        rowCount: result.profile.rowCount,
+        fieldCount: result.profile.fieldCount,
+        insightCount: result.insights.length
+      });
     } catch (error) {
       const message = safeErrorMessage(error);
       logger.error("dataset profile failed", { error: message });
@@ -2149,12 +3851,72 @@ export default function App(): ReactElement {
       isStreaming={isStreaming}
       errorMessage={errorMessage}
       statusText={statusText}
+      activeSessionId={activeSessionId}
+      operatorApiKey={operatorApiKey}
+      operatorRuntime={operatorRuntime}
+      metadataInsights={metadataInsights}
+      metadataQuery={metadataQuery}
+      metadataSearchResults={metadataSearchResults}
+      agentSessions={agentSessions}
+      selectedSession={selectedSession}
+      isLoadingSessions={isLoadingSessions}
+      isLoadingSessionDetail={isLoadingSessionDetail}
+      isClearingSessions={isClearingSessions}
+      isLoadingRuntime={isLoadingRuntime}
+      isLoadingMetadata={isLoadingMetadata}
+      isSearchingMetadata={isSearchingMetadata}
+      isSavingSessionMetadata={isSavingSessionMetadata}
+      isForkingSession={isForkingSession}
+      deletingSessionId={deletingSessionId}
+      sessionTitleValue={sessionTitleValue}
+      sessionTagsValue={sessionTagsValue}
       onComposerChange={setComposerValue}
-      onSend={() => {
+      onSubmit={() => {
         void handleSend();
       }}
+      onStop={handleStopStreaming}
       onPromptSelect={(prompt) => {
         setComposerValue(prompt);
+      }}
+      onOperatorApiKeyChange={setOperatorApiKey}
+      onLoadRuntime={() => {
+        void handleLoadRuntime();
+      }}
+      onMetadataQueryChange={setMetadataQuery}
+      onLoadMetadataInsights={() => {
+        void handleLoadMetadataInsights();
+      }}
+      onSearchMetadata={() => {
+        void handleSearchMetadata();
+      }}
+      onUseMetadataStarterSql={(sql) => {
+        setSqlValue(sql);
+        setSqlResult(null);
+        setSqlQueryResult(null);
+        logger.info("metadata starter sql reused", {
+          sqlLength: sql.length
+        });
+      }}
+      onLoadSessions={() => {
+        void handleLoadSessions();
+      }}
+      onCreateSession={handleCreateSession}
+      onSelectSession={(sessionId) => {
+        void handleSelectSession(sessionId);
+      }}
+      onSessionTitleChange={setSessionTitleValue}
+      onSessionTagsChange={setSessionTagsValue}
+      onSaveSession={() => {
+        void handleSaveSession();
+      }}
+      onForkSession={() => {
+        void handleForkSession();
+      }}
+      onDeleteSession={(sessionId) => {
+        void handleDeleteSession(sessionId);
+      }}
+      onClearSessions={() => {
+        void handleClearSessions();
       }}
       sqlValue={sqlValue}
       sqlRole={sqlRole}
@@ -2179,12 +3941,18 @@ export default function App(): ReactElement {
       onRunSql={() => {
         void handleRunSql();
       }}
+      onSqlPageChange={(offset) => {
+        void handleLoadSqlPage(offset);
+      }}
       onReuseSqlHistory={handleReuseSqlHistory}
-      onExportSqlResult={handleExportSqlResult}
+      onExportSqlResult={(entry) => {
+        void handleExportSqlResult(entry);
+      }}
       onClearSqlHistory={handleClearSqlHistory}
       datasetValue={datasetValue}
       datasetRows={datasetRows}
       datasetProfile={datasetProfile}
+      datasetInsights={datasetInsights}
       chartRecommendations={chartRecommendations}
       chartTheme={chartTheme}
       isProfilingDataset={isProfilingDataset}
@@ -2196,6 +3964,7 @@ export default function App(): ReactElement {
         setDatasetValue(value);
         setDatasetRows([]);
         setDatasetProfile(null);
+        setDatasetInsights([]);
         setChartRecommendations([]);
       }}
       onProfileDataset={() => {
@@ -2346,4 +4115,41 @@ function formatHistoryTimestamp(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(date);
+}
+
+function shouldLoadFullSqlExport(result: SqlQueryResult | null): boolean {
+  if (!result?.page) {
+    return false;
+  }
+
+  return result.page.offset > 0 || result.page.returnedRows < result.rowCount;
+}
+
+async function waitForSqlQueryJob(
+  jobId: string,
+  options: {
+    readonly maxAttempts?: number;
+    readonly delayMs?: number;
+  } = {}
+) {
+  const maxAttempts = options.maxAttempts ?? 60;
+  const delayMs = options.delayMs ?? 250;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const job = await getSqlQueryJob(jobId);
+
+    if (job.status === "completed" || job.status === "failed") {
+      return job;
+    }
+
+    await sleep(delayMs);
+  }
+
+  throw new Error(`Timed out while waiting for SQL query job ${jobId}`);
+}
+
+async function sleep(delayMs: number): Promise<void> {
+  await new Promise((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
 }

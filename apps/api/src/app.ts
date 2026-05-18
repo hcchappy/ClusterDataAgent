@@ -1,3 +1,4 @@
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
@@ -7,11 +8,14 @@ import {
   FileSessionStore,
   InMemorySessionStore,
   buildAgentManifest,
+  type AgentEvaluationCase,
+  type AgentEvaluationSuiteResult,
   type AgentTurnRequest,
   type SessionStore
 } from "@clusterdata/agent-core";
 import {
   analyzeTimeSeries,
+  generateDatasetInsights,
   profileDataset,
   summarizeSeries,
   type DatasetRow,
@@ -24,16 +28,31 @@ import {
   type ChartTheme
 } from "@clusterdata/chart-engine";
 import {
+  buildQueryResultCacheKey,
+  InMemoryAsyncQueryJobManager,
+  InMemoryQueryResultCache,
+  paginateReadOnlyQueryResult,
   PostgresReadOnlyQueryExecutor,
   summarizeDatabaseConfig,
   type ReadOnlyQueryExecutor
 } from "@clusterdata/database";
 import {
+  buildSemanticCatalogFromMetadata,
+  buildMetadataCatalogInsights,
   InMemoryMetadataCache,
+  InMemorySemanticCatalogCache,
   PrismaMetadataCatalogService,
+  SemanticCatalogService,
+  buildSemanticCatalogInsights,
+  buildSemanticMetricQuery,
   loadPostgresSchemaCatalog,
   searchMetadataCatalog,
-  type PrismaSchemaCatalog
+  searchSemanticCatalog,
+  type PrismaSchemaCatalog,
+  type SemanticCatalog,
+  type SemanticMetricFilterDefinition,
+  type SemanticMetricQueryRequest,
+  type SemanticTimeGrain
 } from "@clusterdata/metadata-engine";
 import {
   assertAccessRequestInput,
@@ -41,6 +60,8 @@ import {
   assertChatRequestSecurity,
   assertDatasetProfileRequestSecurity,
   assertMetadataSearchRequestSecurity,
+  assertSessionIdInput,
+  assertSessionMetadataInput,
   assertSqlReadAccess,
   assertSqlRoleRequestInput,
   assertSeriesRequestSecurity,
@@ -55,7 +76,12 @@ import {
   type SqlReadAccessPolicy,
   type UserRole
 } from "@clusterdata/security";
-import { createLogger, safeErrorMessage, AppError } from "@clusterdata/shared";
+import {
+  buildErrorResponse,
+  createLogger,
+  safeErrorMessage,
+  AppError
+} from "@clusterdata/shared";
 import {
   buildMetadataAwareSelectQuery as buildSqlAwareSelectQuery,
   buildSafeLimitClause,
@@ -71,21 +97,266 @@ import { loadApiConfig, type ApiConfig } from "./config.js";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const schemaPath = resolve(moduleDir, "../../../packages/database/prisma/schema.prisma");
+const defaultSemanticCatalogPath = resolve(
+  moduleDir,
+  "../../../packages/database/semantic/catalog.json"
+);
 const DEFAULT_SQL_LIMIT = 500;
+const DEFAULT_SEMANTIC_QUERY_LIMIT = 500;
+
+type SqlStatementValidation = ReturnType<typeof validateSqlStatement>;
+
+interface ValidatedSqlQueryExecutionResult {
+  readonly columns: readonly string[];
+  readonly rows: readonly Readonly<Record<string, unknown>>[];
+  readonly rowCount: number;
+  readonly durationMs: number;
+  readonly validation: SqlStatementValidation;
+}
+
+interface SqlQueryCacheMetadata {
+  readonly key: string;
+  readonly hit: boolean;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+}
+
+interface SqlQueryExecutionPayload {
+  readonly result: ValidatedSqlQueryExecutionResult;
+  readonly cache: SqlQueryCacheMetadata;
+}
+
+interface SqlQueryPageRequest {
+  readonly offset: number;
+  readonly pageLimit?: number;
+}
+
+interface SqlAsyncQueryJobSummary {
+  readonly jobId: string;
+  readonly status: "running" | "completed" | "failed";
+  readonly submittedAt: string;
+  readonly startedAt: string;
+  readonly completedAt?: string;
+  readonly expiresAt: string;
+  readonly cacheKey?: string;
+  readonly rowCount?: number;
+  readonly durationMs?: number;
+  readonly referencedTables?: readonly string[];
+  readonly limit?: number;
+  readonly error?: {
+    readonly message: string;
+    readonly code?: string;
+  };
+}
 
 export interface BuildApiOptions {
   readonly agentExecutor?: AgentExecutor;
+  readonly analysisAgentEvaluationCases?: readonly AgentEvaluationCase[];
   readonly queryExecutor?: ReadOnlyQueryExecutor;
   readonly sessionStore?: SessionStore;
   readonly toolRegistry?: ToolRegistry;
   readonly metadataCatalog?: PrismaSchemaCatalog;
   readonly metadataService?: PrismaMetadataCatalogService;
   readonly metadataCatalogLoader?: (config: ApiConfig) => Promise<PrismaSchemaCatalog>;
+  readonly semanticCatalog?: SemanticCatalog;
+  readonly semanticService?: SemanticCatalogService;
+  readonly semanticCatalogLoader?: (
+    config: ApiConfig,
+    metadataCatalog: PrismaSchemaCatalog
+  ) => Promise<SemanticCatalog>;
+}
+
+interface RuntimeRouteCount {
+  readonly route: string;
+  readonly requests: number;
+}
+
+interface RuntimePublicSnapshot {
+  readonly startedAt: string;
+  readonly uptimeMs: number;
+  readonly activeRequests: number;
+  readonly activeChatStreams: number;
+  readonly totalRequests: number;
+  readonly rateLimitedRequests: number;
+  readonly lastMetadataRefreshAt: string;
+}
+
+interface RuntimeOperatorSnapshot extends RuntimePublicSnapshot {
+  readonly statusCounts: {
+    readonly success: number;
+    readonly clientError: number;
+    readonly serverError: number;
+  };
+  readonly chatStreams: {
+    readonly started: number;
+    readonly completed: number;
+    readonly aborted: number;
+    readonly failed: number;
+  };
+  readonly routes: readonly RuntimeRouteCount[];
+}
+
+class RuntimeTelemetry {
+  private readonly startedAt = new Date().toISOString();
+  private readonly startedAtMs = Date.now();
+  private activeRequests = 0;
+  private activeChatStreams = 0;
+  private totalRequests = 0;
+  private successRequests = 0;
+  private clientErrorRequests = 0;
+  private serverErrorRequests = 0;
+  private totalChatStreams = 0;
+  private completedChatStreams = 0;
+  private abortedChatStreams = 0;
+  private failedChatStreams = 0;
+  private rateLimitedRequests = 0;
+  private lastMetadataRefreshAt: string;
+  private readonly routeCounts = new Map<string, number>();
+
+  public constructor(initialMetadataLoadedAt: string) {
+    this.lastMetadataRefreshAt = initialMetadataLoadedAt;
+  }
+
+  public onRequest(route: string): void {
+    this.activeRequests += 1;
+    this.totalRequests += 1;
+    this.routeCounts.set(route, (this.routeCounts.get(route) ?? 0) + 1);
+  }
+
+  public onResponse(statusCode: number): void {
+    this.activeRequests = Math.max(this.activeRequests - 1, 0);
+
+    if (statusCode >= 500) {
+      this.serverErrorRequests += 1;
+      return;
+    }
+
+    if (statusCode >= 400) {
+      this.clientErrorRequests += 1;
+      return;
+    }
+
+    this.successRequests += 1;
+  }
+
+  public onChatStreamStarted(): void {
+    this.activeChatStreams += 1;
+    this.totalChatStreams += 1;
+  }
+
+  public onChatStreamCompleted(): void {
+    this.activeChatStreams = Math.max(this.activeChatStreams - 1, 0);
+    this.completedChatStreams += 1;
+  }
+
+  public onChatStreamAborted(): void {
+    this.activeChatStreams = Math.max(this.activeChatStreams - 1, 0);
+    this.abortedChatStreams += 1;
+  }
+
+  public onChatStreamFailed(): void {
+    this.activeChatStreams = Math.max(this.activeChatStreams - 1, 0);
+    this.failedChatStreams += 1;
+  }
+
+  public onRateLimited(): void {
+    this.rateLimitedRequests += 1;
+  }
+
+  public setLastMetadataRefreshAt(value: string): void {
+    this.lastMetadataRefreshAt = value;
+  }
+
+  public getPublicSnapshot(): RuntimePublicSnapshot {
+    return {
+      startedAt: this.startedAt,
+      uptimeMs: Date.now() - this.startedAtMs,
+      activeRequests: this.activeRequests,
+      activeChatStreams: this.activeChatStreams,
+      totalRequests: this.totalRequests,
+      rateLimitedRequests: this.rateLimitedRequests,
+      lastMetadataRefreshAt: this.lastMetadataRefreshAt
+    };
+  }
+
+  public getOperatorSnapshot(): RuntimeOperatorSnapshot {
+    return {
+      ...this.getPublicSnapshot(),
+      statusCounts: {
+        success: this.successRequests,
+        clientError: this.clientErrorRequests,
+        serverError: this.serverErrorRequests
+      },
+      chatStreams: {
+        started: this.totalChatStreams,
+        completed: this.completedChatStreams,
+        aborted: this.abortedChatStreams,
+        failed: this.failedChatStreams
+      },
+      routes: Array.from(this.routeCounts.entries())
+        .map(([route, requests]) => ({ route, requests }))
+        .sort((left, right) => right.requests - left.requests || left.route.localeCompare(right.route))
+    };
+  }
+}
+
+class InMemoryRateLimiter {
+  private readonly buckets = new Map<string, { count: number; resetAtMs: number }>();
+
+  public take(
+    key: string,
+    policy: {
+      readonly limit: number;
+      readonly windowMs: number;
+    }
+  ): {
+    readonly allowed: boolean;
+    readonly remaining: number;
+    readonly retryAfterMs: number;
+  } {
+    const now = Date.now();
+    const current = this.buckets.get(key);
+
+    if (!current || current.resetAtMs <= now) {
+      this.buckets.set(key, {
+        count: 1,
+        resetAtMs: now + policy.windowMs
+      });
+
+      return {
+        allowed: true,
+        remaining: Math.max(policy.limit - 1, 0),
+        retryAfterMs: policy.windowMs
+      };
+    }
+
+    if (current.count >= policy.limit) {
+      return {
+        allowed: false,
+        remaining: 0,
+        retryAfterMs: Math.max(current.resetAtMs - now, 0)
+      };
+    }
+
+    current.count += 1;
+
+    return {
+      allowed: true,
+      remaining: Math.max(policy.limit - current.count, 0),
+      retryAfterMs: Math.max(current.resetAtMs - now, 0)
+    };
+  }
 }
 
 export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyInstance> {
   const app = fastify({
-    logger: true
+    logger: {
+      redact: [
+        "req.headers.authorization",
+        "req.headers.cookie",
+        'req.headers["x-operator-api-key"]'
+      ]
+    }
   });
   const config = loadApiConfig(process.env);
   const logger = createLogger("api");
@@ -106,13 +377,67 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       logger,
       options.metadataCatalogLoader
     ));
+  const shouldUseGeneratedSemanticCatalog =
+    !options.semanticCatalog &&
+    !options.semanticService &&
+    !options.semanticCatalogLoader &&
+    config.semanticCatalogPath.trim().length === 0 &&
+    (Boolean(options.metadataCatalog) ||
+      Boolean(options.metadataService) ||
+      Boolean(options.metadataCatalogLoader));
+  const semanticService =
+    options.semanticService ??
+    new SemanticCatalogService({
+      sourcePath: resolveSemanticCatalogPath(config),
+      getMetadataCatalog: () => metadataCatalog,
+      cache: new InMemorySemanticCatalogCache(),
+      initialCatalog: options.semanticCatalog,
+      logger
+    });
+  let semanticCatalog =
+    options.semanticCatalog ??
+    (shouldUseGeneratedSemanticCatalog
+      ? buildSemanticCatalogFromMetadata(metadataCatalog, {
+          sourcePath: `generated://${metadataCatalog.sourcePath}`,
+          loadedAt: metadataCatalog.loadedAt
+        })
+      : await loadConfiguredSemanticCatalog(
+          config,
+          metadataCatalog,
+          semanticService,
+          logger,
+          options.semanticCatalogLoader
+        ));
   const queryExecutor = options.queryExecutor ?? createQueryExecutor(config, logger);
+  const sqlQueryResultCache = new InMemoryQueryResultCache<SqlQueryExecutionPayload>({
+    ttlMs: config.sqlQueryExecution.cacheTtlMs,
+    maxEntries: config.sqlQueryExecution.cacheMaxEntries,
+    logger
+  });
+  const sqlAsyncQueryJobs = new InMemoryAsyncQueryJobManager<SqlQueryExecutionPayload>({
+    ttlMs: config.sqlQueryExecution.asyncJobTtlMs,
+    maxEntries: config.sqlQueryExecution.asyncJobMaxEntries,
+    logger
+  });
+  const runtimeTelemetry = new RuntimeTelemetry(metadataCatalog.loadedAt);
+  const rateLimiter = new InMemoryRateLimiter();
   const toolRegistry =
     options.toolRegistry ??
-    buildToolRegistry(() => metadataCatalog, queryExecutor, {}, {
-      sqlAccessPolicy: config.sqlAccess,
-      sqlRole: config.sqlAccess.defaultRole
-    });
+    buildToolRegistry(
+      () => metadataCatalog,
+      queryExecutor,
+      {
+        governance: {
+          allowedTools: config.agentAllowedTools,
+          blockedTools: config.agentBlockedTools
+        }
+      },
+      {
+        sqlAccessPolicy: config.sqlAccess,
+        sqlRole: config.sqlAccess.defaultRole
+      },
+      () => semanticCatalog
+    );
   const sessionStore = options.sessionStore ?? createSessionStore(config, logger);
   const agentExecutor =
     options.agentExecutor ??
@@ -126,16 +451,35 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
             defaultModel: config.openAiModel,
             requestTimeoutMs: config.openAiTimeoutMs,
             maxToolCalls: config.agentMaxToolCalls,
-            maxRetries: 1
+            maxRetries: 1,
+            maxToolResultChars: config.agentMaxToolResultChars
           },
           logger
         })
       : undefined);
+  const defaultAnalysisAgentEvaluationCases =
+    options.analysisAgentEvaluationCases ??
+    buildDefaultAnalysisAgentEvaluationCases(toolRegistry.list().map((tool) => tool.name));
+  let latestAnalysisAgentEvaluation: AgentEvaluationSuiteResult | undefined;
 
   logger.info("metadata catalog loaded", {
     sourcePath: metadataCatalog.sourcePath,
     tableCount: metadataCatalog.summary.tableCount,
     relationCount: metadataCatalog.summary.relationCount
+  });
+  logger.info("semantic catalog loaded", {
+    sourcePath: semanticCatalog.sourcePath,
+    modelCount: semanticCatalog.summary.modelCount,
+    metricCount: semanticCatalog.summary.metricCount,
+    dimensionCount: semanticCatalog.summary.dimensionCount
+  });
+
+  app.addHook("onRequest", async (request) => {
+    runtimeTelemetry.onRequest(request.routeOptions?.url ?? request.url);
+  });
+
+  app.addHook("onResponse", async (_request, reply) => {
+    runtimeTelemetry.onResponse(reply.statusCode);
   });
 
   await app.register(cors, {
@@ -143,22 +487,28 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
   });
 
   app.setErrorHandler((error, _request, reply) => {
-    const appError = error instanceof AppError ? error : undefined;
-    const statusCode = appError?.statusCode ?? 500;
+    const appError =
+      error instanceof AppError
+        ? error
+        : new AppError(safeErrorMessage(error), "INTERNAL_ERROR", 500);
+    const statusCode = appError.statusCode;
 
     app.log.error(
       {
         err: error,
-        code: appError?.code
+        code: appError.code
       },
       "request failed"
     );
 
-    reply.status(statusCode).send({
-      ok: false,
-      error: safeErrorMessage(error),
-      code: appError?.code ?? "INTERNAL_ERROR"
-    });
+    if (
+      appError.statusCode === 429 &&
+      typeof appError.details?.retryAfterMs === "number"
+    ) {
+      reply.header("retry-after", Math.max(1, Math.ceil(appError.details.retryAfterMs / 1000)));
+    }
+
+    reply.status(statusCode).send(buildErrorResponse(appError, _request.id));
   });
 
   app.get("/health", async () => ({
@@ -168,6 +518,20 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     database: summarizeDatabaseConfig({
       databaseUrl: config.databaseUrl
     })
+  }));
+
+  app.get("/health/ready", async () => ({
+    ok: true,
+    ready: true,
+    checks: {
+      metadataLoaded: true,
+      semanticLoaded: true,
+      sessionStoreReady: true,
+      toolsRegistered: toolRegistry.list().length > 0,
+      chatConfigured: Boolean(agentExecutor),
+      databaseQueryConfigured: Boolean(queryExecutor)
+    },
+    runtime: runtimeTelemetry.getPublicSnapshot()
   }));
 
   app.get("/api/overview", async () => {
@@ -197,11 +561,16 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       manifest,
       metadata: metadataCatalog.summary,
       relations: metadataCatalog.relations,
+      semantic: semanticCatalog.summary,
       tools: toolRegistry.list().map((tool) => ({
         name: tool.name,
         description: tool.description
       })),
       toolMetrics: toolRegistry.getMetrics(),
+      toolGovernance: {
+        ...toolRegistry.getGovernanceSummary(),
+        maxToolResultChars: config.agentMaxToolResultChars
+      },
       agent: {
         configured: Boolean(agentExecutor),
         endpoint: config.openAiEndpoint,
@@ -212,9 +581,11 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
           config.agentMemoryStorePath.trim().length > 0
             ? config.agentMemoryStorePath
             : undefined,
+        sessionCount: sessionStore.list().length,
         maxToolCalls: config.agentMaxToolCalls,
         streaming: true
       },
+      runtime: runtimeTelemetry.getPublicSnapshot(),
       requestSecurity: requestSecurityPolicy,
       sqlAccess: {
         defaultRole: config.sqlAccess.defaultRole,
@@ -228,6 +599,484 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       })
     };
   });
+
+  app.get("/api/agent/sessions", async (request) =>
+    await runAuditedRequest(
+      request,
+      "agent.sessions.list",
+      undefined,
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator session requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+        const sessions = sessionStore.list();
+
+        app.log.info(
+          {
+            sessionCount: sessions.length
+          },
+          "agent sessions listed"
+        );
+
+        return {
+          ok: true,
+          sessions
+        };
+      },
+      (result) => ({
+        sessionCount: result.sessions.length
+      })
+    )
+  );
+
+  app.get("/api/agent/sessions/:sessionId", async (request) => {
+    const params = request.params as { sessionId?: string };
+    const sessionId =
+      typeof params.sessionId === "string" && params.sessionId.trim().length > 0
+        ? params.sessionId.trim()
+        : undefined;
+
+    return await runAuditedRequest(
+      request,
+      "agent.sessions.get",
+      {
+        sessionId
+      },
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator session requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+
+        if (!sessionId) {
+          throw new AppError("sessionId is required", "AGENT_SESSION_ID_REQUIRED", 400);
+        }
+
+        assertSessionIdInput(sessionId, requestSecurityPolicy);
+
+        const session = sessionStore.read(sessionId);
+
+        if (!session || session.messages.length === 0) {
+          throw new AppError(
+            `Unknown agent session: ${sessionId}`,
+            "AGENT_SESSION_NOT_FOUND",
+            404,
+            {
+              sessionId
+            }
+          );
+        }
+
+        app.log.info(
+          {
+            sessionId,
+            messageCount: session.messages.length
+          },
+          "agent session returned"
+        );
+
+        return {
+          ok: true,
+          session
+        };
+      },
+      (result) => ({
+        messageCount: result.session.messages.length,
+        updatedAt: result.session.updatedAt
+      })
+    );
+  });
+
+  app.patch("/api/agent/sessions/:sessionId", async (request) => {
+    const params = request.params as { sessionId?: string };
+    const body = request.body as {
+      title?: string | null;
+      tags?: readonly string[] | null;
+    };
+    const sessionId =
+      typeof params.sessionId === "string" && params.sessionId.trim().length > 0
+        ? params.sessionId.trim()
+        : undefined;
+
+    return await runAuditedRequest(
+      request,
+      "agent.sessions.update",
+      {
+        sessionId
+      },
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator session requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+
+        if (!sessionId) {
+          throw new AppError("sessionId is required", "AGENT_SESSION_ID_REQUIRED", 400);
+        }
+
+        assertSessionIdInput(sessionId, requestSecurityPolicy);
+        assertSessionMetadataInput(body, requestSecurityPolicy);
+
+        const session = sessionStore.updateMetadata(sessionId, {
+          title: body?.title,
+          tags: body?.tags
+        });
+
+        if (!session || session.messages.length === 0) {
+          throw new AppError(
+            `Unknown agent session: ${sessionId}`,
+            "AGENT_SESSION_NOT_FOUND",
+            404,
+            {
+              sessionId
+            }
+          );
+        }
+
+        app.log.info(
+          {
+            sessionId,
+            title: session.title,
+            tagCount: session.tags?.length ?? 0
+          },
+          "agent session metadata updated"
+        );
+
+        return {
+          ok: true,
+          session
+        };
+      },
+      (result) => ({
+        title: result.session.title,
+        tagCount: result.session.tags?.length ?? 0
+      })
+    );
+  });
+
+  app.post("/api/agent/sessions/:sessionId/fork", async (request) => {
+    const params = request.params as { sessionId?: string };
+    const body = request.body as {
+      sessionId?: string;
+      title?: string | null;
+      tags?: readonly string[] | null;
+    };
+    const sessionId =
+      typeof params.sessionId === "string" && params.sessionId.trim().length > 0
+        ? params.sessionId.trim()
+        : undefined;
+
+    return await runAuditedRequest(
+      request,
+      "agent.sessions.fork",
+      {
+        sessionId
+      },
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator session requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+
+        if (!sessionId) {
+          throw new AppError("sessionId is required", "AGENT_SESSION_ID_REQUIRED", 400);
+        }
+
+        assertSessionIdInput(sessionId, requestSecurityPolicy);
+        assertSessionMetadataInput(body, requestSecurityPolicy);
+
+        const forkSessionId =
+          typeof body?.sessionId === "string" && body.sessionId.trim().length > 0
+            ? body.sessionId.trim()
+            : `fork-${randomUUID()}`;
+
+        assertSessionIdInput(forkSessionId, requestSecurityPolicy);
+
+        const session = sessionStore.fork(sessionId, forkSessionId, {
+          title: body?.title,
+          tags: body?.tags
+        });
+
+        app.log.info(
+          {
+            sessionId,
+            forkSessionId,
+            messageCount: session.messageCount
+          },
+          "agent session forked"
+        );
+
+        return {
+          ok: true,
+          sourceSessionId: sessionId,
+          session
+        };
+      },
+      (result) => ({
+        forkSessionId: result.session.sessionId,
+        messageCount: result.session.messageCount
+      })
+    );
+  });
+
+  app.delete("/api/agent/sessions/:sessionId", async (request) => {
+    const params = request.params as { sessionId?: string };
+    const sessionId =
+      typeof params.sessionId === "string" && params.sessionId.trim().length > 0
+        ? params.sessionId.trim()
+        : undefined;
+
+    return await runAuditedRequest(
+      request,
+      "agent.sessions.delete",
+      {
+        sessionId
+      },
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator session requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+
+        if (!sessionId) {
+          throw new AppError("sessionId is required", "AGENT_SESSION_ID_REQUIRED", 400);
+        }
+
+        assertSessionIdInput(sessionId, requestSecurityPolicy);
+
+        const deleted = sessionStore.delete(sessionId);
+
+        app.log.info(
+          {
+            sessionId,
+            deleted
+          },
+          "agent session deleted"
+        );
+
+        return {
+          ok: true,
+          sessionId,
+          deleted
+        };
+      },
+      (result) => ({
+        deleted: result.deleted
+      })
+    );
+  });
+
+  app.delete("/api/agent/sessions", async (request) =>
+    await runAuditedRequest(
+      request,
+      "agent.sessions.clear",
+      undefined,
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator session requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+        const deletedCount = sessionStore.clear();
+
+        app.log.info(
+          {
+            deletedCount
+          },
+          "agent sessions cleared"
+        );
+
+        return {
+          ok: true,
+          deletedCount
+        };
+      },
+      (result) => ({
+        deletedCount: result.deletedCount
+      })
+    )
+  );
+
+  app.get("/api/ops/runtime", async (request) =>
+    await runAuditedRequest(
+      request,
+      "ops.runtime.get",
+      undefined,
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+
+        const runtime = runtimeTelemetry.getOperatorSnapshot();
+
+        app.log.info(
+          {
+            uptimeMs: runtime.uptimeMs,
+            activeRequests: runtime.activeRequests,
+            activeChatStreams: runtime.activeChatStreams
+          },
+          "ops runtime returned"
+        );
+
+        return {
+          ok: true,
+          runtime,
+          sessionCount: sessionStore.list().length,
+          toolCount: toolRegistry.list().length,
+          toolMetrics: toolRegistry.getMetrics()
+        };
+      },
+      (result) => ({
+        uptimeMs: result.runtime.uptimeMs,
+        activeRequests: result.runtime.activeRequests
+      })
+    )
+  );
+
+  app.get("/api/ops/analysis-agent", async (request) =>
+    await runAuditedRequest(
+      request,
+      "ops.analysis-agent.get",
+      undefined,
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+
+        const executor = getAgentExecutor(agentExecutor);
+        const observability = executor.getObservabilitySnapshot();
+
+        app.log.info(
+          {
+            totalTurns: observability.summary.totalTurns,
+            activeTurnCount: observability.summary.activeTurnCount,
+            retainedTurnCount: observability.summary.retainedTurnCount,
+            hasLatestEvaluation: Boolean(latestAnalysisAgentEvaluation)
+          },
+          "analysis agent observability returned"
+        );
+
+        return {
+          ok: true,
+          observability,
+          latestEvaluation: latestAnalysisAgentEvaluation
+        };
+      },
+      (result) => ({
+        totalTurns: result.observability.summary.totalTurns,
+        hasLatestEvaluation: Boolean(result.latestEvaluation)
+      })
+    )
+  );
+
+  app.post("/api/ops/analysis-agent/evals", async (request) =>
+    await runAuditedRequest(
+      request,
+      "ops.analysis-agent.eval",
+      undefined,
+      async () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "operator",
+          config.rateLimit.maxOperatorRequests,
+          config.rateLimit.windowMs,
+          "OPERATOR_RATE_LIMITED",
+          "Too many operator requests"
+        );
+        assertOperatorRequestAuthorized(request, config);
+
+        const executor = getAgentExecutor(agentExecutor);
+        const evaluationRequest = parseAnalysisAgentEvaluationRequest(
+          request.body,
+          requestSecurityPolicy,
+          defaultAnalysisAgentEvaluationCases
+        );
+
+        latestAnalysisAgentEvaluation = await executor.runEvaluationSuite(evaluationRequest);
+
+        app.log.info(
+          {
+            runId: latestAnalysisAgentEvaluation.runId,
+            totalCases: latestAnalysisAgentEvaluation.totalCases,
+            passedCases: latestAnalysisAgentEvaluation.passedCases,
+            failedCases: latestAnalysisAgentEvaluation.failedCases
+          },
+          "analysis agent evaluation completed"
+        );
+
+        return {
+          ok: true,
+          evaluation: latestAnalysisAgentEvaluation,
+          observability: executor.getObservabilitySnapshot()
+        };
+      },
+      (result) => ({
+        runId: result.evaluation.runId,
+        totalCases: result.evaluation.totalCases,
+        failedCases: result.evaluation.failedCases
+      })
+    )
+  );
 
   app.get("/api/metadata/tables", async () => {
     app.log.info(
@@ -244,6 +1093,36 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
       loadedAt: metadataCatalog.loadedAt,
       summary: metadataCatalog.summary,
       tables: metadataCatalog.tables
+    };
+  });
+
+  app.get("/api/metadata/insights", async (request) => {
+    const query = request.query as {
+      limit?: string | number;
+    };
+    const parsedLimit =
+      typeof query.limit === "number"
+        ? query.limit
+        : typeof query.limit === "string" && query.limit.trim().length > 0
+          ? Number.parseInt(query.limit, 10)
+          : undefined;
+    const insights = buildMetadataCatalogInsights(metadataCatalog, {
+      tableLimit: parsedLimit
+    });
+
+    app.log.info(
+      {
+        tableCount: insights.tables.length,
+        relationHotspotCount: insights.relationHotspots.length
+      },
+      "metadata insights returned"
+    );
+
+    return {
+      ok: true,
+      sourcePath: metadataCatalog.sourcePath,
+      loadedAt: metadataCatalog.loadedAt,
+      insights
     };
   });
 
@@ -355,6 +1234,18 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
           logger,
           options.metadataCatalogLoader
         );
+        semanticCatalog = shouldUseGeneratedSemanticCatalog
+          ? buildSemanticCatalogFromMetadata(metadataCatalog, {
+              sourcePath: `generated://${metadataCatalog.sourcePath}`,
+              loadedAt: metadataCatalog.loadedAt
+            })
+          : await refreshConfiguredSemanticCatalog(
+              config,
+              metadataCatalog,
+              semanticService,
+              logger,
+              options.semanticCatalogLoader
+            );
 
         app.log.info(
           {
@@ -365,19 +1256,206 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
           },
           "metadata catalog refreshed"
         );
+        app.log.info(
+          {
+            sourcePath: semanticCatalog.sourcePath,
+            modelCount: semanticCatalog.summary.modelCount,
+            metricCount: semanticCatalog.summary.metricCount,
+            loadedAt: semanticCatalog.loadedAt
+          },
+          "semantic catalog refreshed"
+        );
+        runtimeTelemetry.setLastMetadataRefreshAt(metadataCatalog.loadedAt);
 
         return {
           ok: true,
           sourcePath: metadataCatalog.sourcePath,
           loadedAt: metadataCatalog.loadedAt,
           summary: metadataCatalog.summary,
-          relations: metadataCatalog.relations
+          relations: metadataCatalog.relations,
+          semantic: semanticCatalog.summary
         };
       },
       (result) => ({
         tableCount: result.summary.tableCount,
         relationCount: result.summary.relationCount,
         loadedAt: result.loadedAt
+      })
+    )
+  );
+
+  app.get("/api/semantic/catalog", async () => {
+    app.log.info(
+      {
+        modelCount: semanticCatalog.summary.modelCount,
+        metricCount: semanticCatalog.summary.metricCount,
+        dimensionCount: semanticCatalog.summary.dimensionCount
+      },
+      "semantic catalog returned"
+    );
+
+    return {
+      ok: true,
+      sourcePath: semanticCatalog.sourcePath,
+      loadedAt: semanticCatalog.loadedAt,
+      summary: semanticCatalog.summary,
+      models: semanticCatalog.models,
+      metrics: semanticCatalog.metrics
+    };
+  });
+
+  app.get("/api/semantic/insights", async (request) => {
+    const query = request.query as {
+      modelLimit?: string | number;
+      metricLimit?: string | number;
+    };
+    const modelLimit = parseOptionalInteger(query.modelLimit);
+    const metricLimit = parseOptionalInteger(query.metricLimit);
+    const insights = buildSemanticCatalogInsights(semanticCatalog, {
+      modelLimit,
+      metricLimit
+    });
+
+    app.log.info(
+      {
+        modelCount: insights.models.length,
+        metricCount: insights.metrics.length,
+        ownerCount: insights.owners.length
+      },
+      "semantic insights returned"
+    );
+
+    return {
+      ok: true,
+      sourcePath: semanticCatalog.sourcePath,
+      loadedAt: semanticCatalog.loadedAt,
+      insights
+    };
+  });
+
+  app.get("/api/semantic/search", async (request) => {
+    const query = request.query as { q?: string; query?: string; limit?: string | number };
+    const searchQuery = query.q ?? query.query;
+
+    if (typeof searchQuery !== "string") {
+      throw new AppError("semantic search query is required", "SEMANTIC_SEARCH_QUERY_REQUIRED", 400);
+    }
+
+    const limit =
+      typeof query.limit === "undefined" ? 10 : Number.parseInt(String(query.limit), 10);
+
+    assertMetadataSearchRequestSecurity(
+      {
+        query: searchQuery,
+        limit
+      },
+      requestSecurityPolicy
+    );
+
+    const results = searchSemanticCatalog(semanticCatalog, searchQuery, limit);
+
+    app.log.info(
+      {
+        query: searchQuery,
+        limit,
+        resultCount: results.length
+      },
+      "semantic search completed"
+    );
+
+    return {
+      ok: true,
+      query: searchQuery,
+      results
+    };
+  });
+
+  app.post("/api/semantic/sql", async (request) => {
+    const body = request.body as SemanticMetricQueryRequest & { role?: UserRole };
+
+    assertSemanticMetricRequestSecurity(body, requestSecurityPolicy);
+    assertSqlRoleRequestInput(body);
+
+    const role = resolveSqlReadRole(body.role, config.sqlAccess);
+    const metricQuery = buildSemanticMetricQuery(semanticCatalog, body, {
+      maxLimit: DEFAULT_SEMANTIC_QUERY_LIMIT
+    });
+
+    assertSqlStatementAccess(metricQuery.sql, metadataCatalog, role, config.sqlAccess);
+
+    app.log.info(
+      {
+        role,
+        metricIds: metricQuery.metricIds,
+        dimensionIds: metricQuery.dimensionIds,
+        limit: metricQuery.limit
+      },
+      "semantic sql generated"
+    );
+
+    return {
+      ok: true,
+      query: metricQuery,
+      sql: metricQuery.sql
+    };
+  });
+
+  app.post("/api/semantic/query", async (request) =>
+    await runAuditedRequest(
+      request,
+      "semantic.query",
+      undefined,
+      async () => {
+        const body = request.body as SemanticMetricQueryRequest & { role?: UserRole };
+
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "sql",
+          config.rateLimit.maxSqlRequests,
+          config.rateLimit.windowMs,
+          "SQL_RATE_LIMITED",
+          "Too many SQL requests"
+        );
+        assertSemanticMetricRequestSecurity(body, requestSecurityPolicy);
+        assertSqlRoleRequestInput(body);
+
+        const role = resolveSqlReadRole(body.role, config.sqlAccess);
+        const metricQuery = buildSemanticMetricQuery(semanticCatalog, body, {
+          maxLimit: DEFAULT_SEMANTIC_QUERY_LIMIT
+        });
+        const result = await executeValidatedSqlQuery(
+          metricQuery.sql,
+          metadataCatalog,
+          getReadOnlyQueryExecutor(queryExecutor),
+          role,
+          config.sqlAccess
+        );
+
+        app.log.info(
+          {
+            role,
+            metricIds: metricQuery.metricIds,
+            dimensionIds: metricQuery.dimensionIds,
+            rowCount: result.rowCount,
+            durationMs: result.durationMs
+          },
+          "semantic query executed"
+        );
+
+        return {
+          ok: true,
+          query: metricQuery,
+          sql: metricQuery.sql,
+          ...result
+        };
+      },
+      (result) => ({
+        metricIds: result.query.metricIds,
+        dimensionIds: result.query.dimensionIds,
+        rowCount: result.rowCount,
+        durationMs: result.durationMs
       })
     )
   );
@@ -399,6 +1477,16 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
           throw new AppError("sessionId and message are required", "INVALID_CHAT_REQUEST", 400);
         }
 
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "chat",
+          config.rateLimit.maxChatRequests,
+          config.rateLimit.windowMs,
+          "CHAT_RATE_LIMITED",
+          "Too many chat requests"
+        );
         assertChatRequestSecurity(body, requestSecurityPolicy);
 
         const result = await executor.executeTurn(body);
@@ -421,6 +1509,7 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
   app.post("/api/chat/stream", async (request, reply) => {
     const body = request.body as AgentTurnRequest | undefined;
     const executor = getAgentExecutor(agentExecutor);
+    const streamAbortController = new AbortController();
     const auditDetails = {
       sessionId: typeof body?.sessionId === "string" ? body.sessionId : undefined,
       model: typeof body?.model === "string" ? body.model : config.openAiModel,
@@ -437,6 +1526,16 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     }
 
     try {
+      assertRequestRateLimit(
+        request,
+        rateLimiter,
+        runtimeTelemetry,
+        "chat",
+        config.rateLimit.maxChatRequests,
+        config.rateLimit.windowMs,
+        "CHAT_RATE_LIMITED",
+        "Too many chat requests"
+      );
       assertChatRequestSecurity(body, requestSecurityPolicy);
     } catch (error) {
       writeRequestAuditEvent(request, "chat.stream", getSecurityAuditStatus(error), {
@@ -453,14 +1552,30 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     reply.raw.setHeader("Connection", "keep-alive");
     reply.hijack();
     reply.raw.flushHeaders?.();
+    request.raw.once("close", () => {
+      streamAbortController.abort();
+      app.log.info(
+        {
+          sessionId: body.sessionId
+        },
+        "chat stream client disconnected"
+      );
+    });
     let emittedFailureEvent = false;
     let outputChars = 0;
     let toolCallCount = 0;
     let failureCode: string | undefined;
     let failureReason: string | undefined;
+    let streamCompleted = false;
+    let streamFailed = false;
+
+    runtimeTelemetry.onChatStreamStarted();
 
     try {
-      for await (const event of executor.streamTurn(body)) {
+      for await (const event of executor.streamTurn({
+        ...body,
+        signal: streamAbortController.signal
+      })) {
         if (event.type === "response.failed") {
           emittedFailureEvent = true;
           failureCode = "code" in event && typeof event.code === "string" ? event.code : undefined;
@@ -495,6 +1610,8 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
           reason: failureReason
         }
       );
+      runtimeTelemetry.onChatStreamCompleted();
+      streamCompleted = true;
     } catch (error) {
       const appError =
         error instanceof AppError
@@ -503,14 +1620,14 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
               error: safeErrorMessage(error)
             });
 
-      if (!emittedFailureEvent) {
+      if (!emittedFailureEvent && !streamAbortController.signal.aborted) {
         reply.raw.write(
           serializeSseEvent("response.failed", {
             type: "response.failed",
             sessionId: body.sessionId,
             error: appError.message,
-              code: appError.code
-            })
+            code: appError.code
+          })
         );
       }
 
@@ -521,7 +1638,12 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
         code: appError.code,
         reason: appError.message
       });
+      runtimeTelemetry.onChatStreamFailed();
+      streamFailed = true;
     } finally {
+      if (!streamCompleted && !streamFailed && streamAbortController.signal.aborted) {
+        runtimeTelemetry.onChatStreamAborted();
+      }
       reply.raw.end();
     }
   });
@@ -588,38 +1710,65 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
   });
 
   app.post("/api/sql/query", async (request) => {
-    const body = request.body as { sql?: string; role?: UserRole };
+    const body = request.body as {
+      sql?: string;
+      role?: UserRole;
+      offset?: number;
+      pageLimit?: number;
+      useCache?: boolean;
+    };
 
     return await runAuditedRequest(
       request,
       "sql.query",
       {
         sqlChars: typeof body?.sql === "string" ? body.sql.length : undefined,
-        role: body?.role
+        role: body?.role,
+        offset: body?.offset,
+        pageLimit: body?.pageLimit,
+        useCache: body?.useCache
       },
       async () => {
         if (typeof body?.sql !== "string") {
           throw new AppError("sql is required", "SQL_REQUIRED", 400);
         }
 
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "sql",
+          config.rateLimit.maxSqlRequests,
+          config.rateLimit.windowMs,
+          "SQL_RATE_LIMITED",
+          "Too many SQL execution requests"
+        );
         assertSqlRequestSecurity(body, requestSecurityPolicy);
         assertSqlRoleRequestInput(body);
+        const pagination = parseSqlQueryPageRequest(body);
         const role = resolveSqlReadRole(body.role, config.sqlAccess);
-
-        const result = await executeValidatedSqlQuery(
+        const payload = await executeCachedValidatedSqlQuery(
           body.sql,
           metadataCatalog,
           getReadOnlyQueryExecutor(queryExecutor),
+          sqlQueryResultCache,
           role,
-          config.sqlAccess
+          config.sqlAccess,
+          {
+            useCache: body.useCache !== false
+          }
         );
+        const result = buildSqlQueryResponse(payload, pagination);
 
         app.log.info(
           {
             role,
             rowCount: result.rowCount,
             columnCount: result.columns.length,
-            durationMs: result.durationMs
+            durationMs: result.durationMs,
+            offset: result.page.offset,
+            pageLimit: result.page.limit,
+            cacheHit: result.cache.hit
           },
           "sql query executed"
         );
@@ -631,7 +1780,259 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
         columnCount: result.columns.length,
         durationMs: result.durationMs,
         referencedTables: result.validation.referencedTables,
-        limit: result.validation.limit
+        limit: result.validation.limit,
+        offset: result.page.offset,
+        pageLimit: result.page.limit,
+        cacheHit: result.cache.hit
+      })
+    );
+  });
+
+  app.post("/api/sql/query/async", async (request) => {
+    const body = request.body as {
+      sql?: string;
+      role?: UserRole;
+      useCache?: boolean;
+    };
+
+    return await runAuditedRequest(
+      request,
+      "sql.query.async.start",
+      {
+        sqlChars: typeof body?.sql === "string" ? body.sql.length : undefined,
+        role: body?.role,
+        useCache: body?.useCache
+      },
+      async () => {
+        if (typeof body?.sql !== "string") {
+          throw new AppError("sql is required", "SQL_REQUIRED", 400);
+        }
+
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "sql",
+          config.rateLimit.maxSqlRequests,
+          config.rateLimit.windowMs,
+          "SQL_RATE_LIMITED",
+          "Too many SQL execution requests"
+        );
+        assertSqlRequestSecurity(body, requestSecurityPolicy);
+        assertSqlRoleRequestInput(body);
+        const role = resolveSqlReadRole(body.role, config.sqlAccess);
+        const validation = validateAuthorizedSqlStatement(
+          body.sql,
+          metadataCatalog,
+          role,
+          config.sqlAccess
+        );
+        const cacheKey = buildSqlQueryExecutionCacheKey(validation.normalizedSql, role);
+
+        if (body.useCache !== false) {
+          const cached = sqlQueryResultCache.get(cacheKey);
+
+          if (cached) {
+            const cachedJob = sqlAsyncQueryJobs.createCompleted(
+              {
+                ...cached.value,
+                cache: {
+                  key: cacheKey,
+                  hit: true,
+                  createdAt: cached.createdAt,
+                  expiresAt: cached.expiresAt
+                }
+              },
+              {
+              cacheKey,
+              metadata: {
+                role,
+                sqlChars: body.sql.length
+              }
+            });
+
+            app.log.info(
+              {
+                role,
+                jobId: cachedJob.jobId,
+                cacheKey
+              },
+              "sql async query served from cache"
+            );
+
+            return {
+              ok: true,
+              job: buildSqlAsyncQueryJobSummary(cachedJob)
+            };
+          }
+        }
+
+        const job = sqlAsyncQueryJobs.start(
+          async () =>
+            await executeCachedValidatedSqlQueryFromValidation(
+              validation,
+              getReadOnlyQueryExecutor(queryExecutor),
+              sqlQueryResultCache,
+              role,
+              {
+                useCache: false
+              }
+            ),
+          {
+            cacheKey,
+            metadata: {
+              role,
+              sqlChars: body.sql.length
+            }
+          }
+        );
+
+        app.log.info(
+          {
+            role,
+            jobId: job.jobId,
+            cacheKey
+          },
+          "sql async query started"
+        );
+
+        return {
+          ok: true,
+          job: buildSqlAsyncQueryJobSummary(job)
+        };
+      },
+      (result) => ({
+        jobId: result.job.jobId,
+        status: result.job.status,
+        cacheKey: result.job.cacheKey
+      })
+    );
+  });
+
+  app.get("/api/sql/query/jobs/:jobId", async (request) => {
+    const params = request.params as { jobId?: string };
+    const jobId =
+      typeof params.jobId === "string" && params.jobId.trim().length > 0
+        ? params.jobId.trim()
+        : undefined;
+
+    return await runAuditedRequest(
+      request,
+      "sql.query.async.status",
+      {
+        jobId
+      },
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "sql",
+          config.rateLimit.maxSqlRequests,
+          config.rateLimit.windowMs,
+          "SQL_RATE_LIMITED",
+          "Too many SQL execution requests"
+        );
+
+        const job = getSqlAsyncQueryJobOrThrow(sqlAsyncQueryJobs, jobId);
+
+        app.log.info(
+          {
+            jobId: job.jobId,
+            status: job.status
+          },
+          "sql async query status returned"
+        );
+
+        return {
+          ok: true,
+          job: buildSqlAsyncQueryJobSummary(job)
+        };
+      },
+      (result) => ({
+        jobId: result.job.jobId,
+        status: result.job.status
+      })
+    );
+  });
+
+  app.get("/api/sql/query/jobs/:jobId/result", async (request) => {
+    const params = request.params as { jobId?: string };
+    const query = request.query as {
+      offset?: string | number;
+      pageLimit?: string | number;
+    };
+    const jobId =
+      typeof params.jobId === "string" && params.jobId.trim().length > 0
+        ? params.jobId.trim()
+        : undefined;
+
+    return await runAuditedRequest(
+      request,
+      "sql.query.async.result",
+      {
+        jobId,
+        offset: query?.offset,
+        pageLimit: query?.pageLimit
+      },
+      () => {
+        assertRequestRateLimit(
+          request,
+          rateLimiter,
+          runtimeTelemetry,
+          "sql",
+          config.rateLimit.maxSqlRequests,
+          config.rateLimit.windowMs,
+          "SQL_RATE_LIMITED",
+          "Too many SQL execution requests"
+        );
+
+        const pagination = parseSqlQueryPageRequest(query);
+        const job = getSqlAsyncQueryJobOrThrow(sqlAsyncQueryJobs, jobId);
+
+        if (job.status === "failed") {
+          throw new AppError(
+            job.error?.message ?? "SQL query job failed",
+            "SQL_QUERY_JOB_FAILED",
+            409,
+            {
+              jobId: job.jobId,
+              error: job.error
+            }
+          );
+        }
+
+        if (job.status !== "completed" || !job.result) {
+          throw new AppError("SQL query job is still running", "SQL_QUERY_JOB_NOT_READY", 409, {
+            jobId: job.jobId,
+            status: job.status
+          });
+        }
+
+        const result = buildSqlQueryResponse(job.result, pagination);
+
+        app.log.info(
+          {
+            jobId: job.jobId,
+            rowCount: result.rowCount,
+            offset: result.page.offset,
+            pageLimit: result.page.limit
+          },
+          "sql async query result returned"
+        );
+
+        return {
+          ok: true,
+          job: buildSqlAsyncQueryJobSummary(job),
+          result
+        };
+      },
+      (result) => ({
+        jobId: result.job.jobId,
+        status: result.job.status,
+        rowCount: result.result.rowCount,
+        offset: result.result.page.offset,
+        pageLimit: result.result.page.limit
       })
     );
   });
@@ -772,6 +2173,39 @@ export async function buildApi(options: BuildApiOptions = {}): Promise<FastifyIn
     };
   });
 
+  app.post("/api/analysis/insights", async (request) => {
+    const body = request.body as {
+      rows?: readonly DatasetRow[];
+      maxCategoryValues?: number;
+      outlierThreshold?: number;
+      maxInsights?: number;
+    };
+
+    assertDatasetProfileRequestSecurity(body, requestSecurityPolicy);
+
+    const result = generateDatasetInsights({
+      rows: body.rows ?? [],
+      maxCategoryValues: body.maxCategoryValues,
+      outlierThreshold: body.outlierThreshold,
+      maxInsights: body.maxInsights
+    });
+
+    app.log.info(
+      {
+        rowCount: result.profile.rowCount,
+        fieldCount: result.profile.fieldCount,
+        insightCount: result.insights.length
+      },
+      "dataset insights generated"
+    );
+
+    return {
+      ok: true,
+      profile: result.profile,
+      insights: result.insights
+    };
+  });
+
   app.post("/api/charts/suggest", async (request) => {
     const body = request.body as {
       title?: string;
@@ -895,7 +2329,8 @@ export function buildToolRegistry(
   securityOptions: {
     readonly sqlAccessPolicy?: SqlReadAccessPolicy;
     readonly sqlRole?: UserRole;
-  } = {}
+  } = {},
+  getSemanticCatalog?: () => SemanticCatalog
 ): ToolRegistry {
   const toolRegistry = new ToolRegistry(options);
   const sqlAccessPolicy = securityOptions.sqlAccessPolicy;
@@ -981,6 +2416,184 @@ export function buildToolRegistry(
       };
     }
   });
+
+  if (getSemanticCatalog) {
+    builtInTools.push({
+      name: "search-semantics",
+      description:
+        "Search the semantic layer for business-ready models, metrics, and dimensions. Use this before metric SQL generation when the user asks for KPI, trend, or grouped analysis by name.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Metric, dimension, or business KPI term to search for"
+          },
+          limit: {
+            type: "integer",
+            description: "Maximum semantic matches to return"
+          }
+        },
+        required: ["query"],
+        additionalProperties: false
+      },
+      execution: {
+        timeoutMs: 2_000,
+        retries: 0
+      },
+      execute: (input: { query: string; limit?: number }, context) => {
+        const catalog = getSemanticCatalog();
+        const limit = input.limit ?? 10;
+        const results = searchSemanticCatalog(catalog, input.query, limit);
+
+        context?.logger?.info("semantic search tool completed", {
+          query: input.query,
+          limit,
+          resultCount: results.length
+        });
+
+        return {
+          query: input.query,
+          results
+        };
+      }
+    });
+
+    builtInTools.push({
+      name: "generate-metric-sql",
+      description:
+        "Generate SQL from the semantic layer for one or more business metrics, optional grouping dimensions, optional time grain, and filters.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          metricIds: {
+            type: "array",
+            items: { type: "string" }
+          },
+          dimensionIds: {
+            type: "array",
+            items: { type: "string" }
+          },
+          timeDimensionId: { type: "string" },
+          timeGrain: {
+            type: "string",
+            enum: ["raw", "day", "week", "month"]
+          },
+          filters: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                dimensionId: { type: "string" },
+                operator: {
+                  type: "string",
+                  enum: ["=", "!=", ">", ">=", "<", "<=", "in"]
+                },
+                values: {
+                  type: "array",
+                  items: { type: "string" }
+                }
+              },
+              required: ["dimensionId", "operator", "values"],
+              additionalProperties: false
+            }
+          },
+          limit: { type: "integer" }
+        },
+        required: ["metricIds"],
+        additionalProperties: false
+      },
+      execution: {
+        timeoutMs: 2_000,
+        retries: 0
+      },
+      execute: (input: SemanticMetricQueryRequest, context) => {
+        const metricQuery = buildSemanticMetricQuery(getSemanticCatalog(), input, {
+          maxLimit: DEFAULT_SEMANTIC_QUERY_LIMIT
+        });
+
+        if (sqlAccessPolicy) {
+          assertSqlStatementAccess(metricQuery.sql, getMetadataCatalog(), sqlRole, sqlAccessPolicy);
+        }
+
+        context?.logger?.info("semantic metric sql tool completed", {
+          metricIds: metricQuery.metricIds,
+          dimensionIds: metricQuery.dimensionIds,
+          limit: metricQuery.limit
+        });
+
+        return metricQuery;
+      }
+    });
+
+    if (queryExecutor) {
+      builtInTools.push({
+        name: "query-metric",
+        description:
+          "Execute a semantic metric query and return rows for KPI, grouped, and time-series answers.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            metricIds: {
+              type: "array",
+              items: { type: "string" }
+            },
+            dimensionIds: {
+              type: "array",
+              items: { type: "string" }
+            },
+            timeDimensionId: { type: "string" },
+            timeGrain: {
+              type: "string",
+              enum: ["raw", "day", "week", "month"]
+            },
+            filters: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  dimensionId: { type: "string" },
+                  operator: {
+                    type: "string",
+                    enum: ["=", "!=", ">", ">=", "<", "<=", "in"]
+                  },
+                  values: {
+                    type: "array",
+                    items: { type: "string" }
+                  }
+                },
+                required: ["dimensionId", "operator", "values"],
+                additionalProperties: false
+              }
+            },
+            limit: { type: "integer" }
+          },
+          required: ["metricIds"],
+          additionalProperties: false
+        },
+        execution: {
+          timeoutMs: 15_000,
+          retries: 0
+        },
+        execute: async (input: SemanticMetricQueryRequest) => {
+          const metricQuery = buildSemanticMetricQuery(getSemanticCatalog(), input, {
+            maxLimit: DEFAULT_SEMANTIC_QUERY_LIMIT
+          });
+
+          return {
+            query: metricQuery,
+            ...(await executeValidatedSqlQuery(
+              metricQuery.sql,
+              getMetadataCatalog(),
+              queryExecutor,
+              sqlRole,
+              sqlAccessPolicy
+            ))
+          };
+        }
+      });
+    }
+  }
 
   builtInTools.push({
     name: "validate-sql",
@@ -1326,6 +2939,8 @@ export function buildToolRegistry(
 interface AuditedRequestLike {
   readonly id: string;
   readonly url: string;
+  readonly ip?: string;
+  readonly headers?: Readonly<Record<string, string | string[] | undefined>>;
   readonly routeOptions?: {
     readonly url?: string;
   };
@@ -1386,6 +3001,51 @@ function getSecurityAuditStatus(error: unknown): SecurityAuditStatus {
   return "failed";
 }
 
+function assertRequestRateLimit(
+  request: AuditedRequestLike,
+  rateLimiter: InMemoryRateLimiter,
+  runtimeTelemetry: RuntimeTelemetry,
+  bucket: "chat" | "operator" | "sql",
+  limit: number,
+  windowMs: number,
+  code: string,
+  message: string
+): void {
+  const route = request.routeOptions?.url ?? request.url;
+  const requester = buildRequesterKey(request);
+  const result = rateLimiter.take(`${bucket}:${requester}:${route}`, {
+    limit,
+    windowMs
+  });
+
+  if (result.allowed) {
+    return;
+  }
+
+  runtimeTelemetry.onRateLimited();
+
+  throw new AppError(message, code, 429, {
+    bucket,
+    limit,
+    windowMs,
+    retryAfterMs: result.retryAfterMs
+  });
+}
+
+function buildRequesterKey(request: AuditedRequestLike): string {
+  const headerValue = request.headers?.["x-forwarded-for"];
+
+  if (typeof headerValue === "string" && headerValue.trim().length > 0) {
+    return headerValue.split(",")[0]!.trim();
+  }
+
+  if (Array.isArray(headerValue) && typeof headerValue[0] === "string" && headerValue[0].trim().length > 0) {
+    return headerValue[0].split(",")[0]!.trim();
+  }
+
+  return request.ip?.trim() || "unknown";
+}
+
 function expandMetadataSearchQueries(query: string): readonly string[] {
   const normalizedQuery = query.trim();
 
@@ -1412,6 +3072,233 @@ function expandMetadataSearchQueries(query: string): readonly string[] {
   }
 
   return [...expansions];
+}
+
+function parseOptionalInteger(value: string | number | undefined): number | undefined {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    return Number.parseInt(value, 10);
+  }
+
+  return undefined;
+}
+
+function parseSqlQueryPageRequest(input: {
+  readonly offset?: string | number;
+  readonly pageLimit?: string | number;
+}): SqlQueryPageRequest {
+  const offset = parseOptionalInteger(input.offset);
+  const pageLimit = parseOptionalInteger(input.pageLimit);
+
+  if (typeof offset !== "undefined" && (!Number.isInteger(offset) || offset < 0)) {
+    throw new AppError("offset must be a non-negative integer", "INVALID_SQL_QUERY_OFFSET", 400, {
+      offset: input.offset
+    });
+  }
+
+  if (
+    typeof pageLimit !== "undefined" &&
+    (!Number.isInteger(pageLimit) || pageLimit <= 0 || pageLimit > DEFAULT_SQL_LIMIT)
+  ) {
+    throw new AppError(
+      `pageLimit must be between 1 and ${DEFAULT_SQL_LIMIT}`,
+      "INVALID_SQL_QUERY_PAGE_LIMIT",
+      400,
+      {
+        pageLimit: input.pageLimit
+      }
+    );
+  }
+
+  return {
+    offset: offset ?? 0,
+    pageLimit
+  };
+}
+
+function assertSemanticMetricRequestSecurity(
+  input: SemanticMetricQueryRequest | undefined,
+  policy: ApiConfig["requestSecurity"]
+): asserts input is SemanticMetricQueryRequest {
+  if (!input || !Array.isArray(input.metricIds) || input.metricIds.length === 0) {
+    throw new AppError("metricIds are required", "SEMANTIC_METRIC_IDS_REQUIRED", 400);
+  }
+
+  if (input.metricIds.length > 8) {
+    throw new AppError("Too many semantic metrics requested", "SEMANTIC_METRIC_LIMIT_EXCEEDED", 400, {
+      count: input.metricIds.length,
+      limit: 8
+    });
+  }
+
+  for (const metricId of input.metricIds) {
+    assertBoundedSemanticText(metricId, "metricId", policy.maxIdentifierChars, "SEMANTIC_METRIC_ID_TOO_LARGE");
+  }
+
+  if (typeof input.timeDimensionId !== "undefined") {
+    assertBoundedSemanticText(
+      input.timeDimensionId,
+      "timeDimensionId",
+      policy.maxIdentifierChars,
+      "SEMANTIC_TIME_DIMENSION_ID_TOO_LARGE"
+    );
+  }
+
+  if (typeof input.timeGrain !== "undefined") {
+    assertSemanticTimeGrain(input.timeGrain);
+  }
+
+  if (typeof input.limit !== "undefined") {
+    if (!Number.isInteger(input.limit) || input.limit <= 0 || input.limit > DEFAULT_SEMANTIC_QUERY_LIMIT) {
+      throw new AppError(
+        `Semantic query limit must be between 1 and ${DEFAULT_SEMANTIC_QUERY_LIMIT}`,
+        "INVALID_SEMANTIC_QUERY_LIMIT",
+        400,
+        {
+          limit: input.limit
+        }
+      );
+    }
+  }
+
+  if (typeof input.dimensionIds !== "undefined") {
+    if (!Array.isArray(input.dimensionIds)) {
+      throw new AppError("dimensionIds must be an array", "INVALID_SEMANTIC_DIMENSIONS", 400);
+    }
+
+    if (input.dimensionIds.length > 12) {
+      throw new AppError("Too many semantic dimensions requested", "SEMANTIC_DIMENSION_LIMIT_EXCEEDED", 400, {
+        count: input.dimensionIds.length,
+        limit: 12
+      });
+    }
+
+    for (const dimensionId of input.dimensionIds) {
+      assertBoundedSemanticText(
+        dimensionId,
+        "dimensionId",
+        policy.maxIdentifierChars,
+        "SEMANTIC_DIMENSION_ID_TOO_LARGE"
+      );
+    }
+  }
+
+  if (typeof input.filters !== "undefined") {
+    if (!Array.isArray(input.filters)) {
+      throw new AppError("filters must be an array", "INVALID_SEMANTIC_FILTERS", 400);
+    }
+
+    if (input.filters.length > 12) {
+      throw new AppError("Too many semantic filters requested", "SEMANTIC_FILTER_LIMIT_EXCEEDED", 400, {
+        count: input.filters.length,
+        limit: 12
+      });
+    }
+
+    for (const filter of input.filters) {
+      assertSemanticFilterSecurity(filter, policy);
+    }
+  }
+}
+
+function assertSemanticFilterSecurity(
+  filter: SemanticMetricFilterDefinition,
+  policy: ApiConfig["requestSecurity"]
+): void {
+  assertBoundedSemanticText(
+    filter.dimensionId,
+    "filter.dimensionId",
+    policy.maxIdentifierChars,
+    "SEMANTIC_FILTER_DIMENSION_ID_TOO_LARGE"
+  );
+  assertSemanticFilterOperator(filter.operator);
+
+  if (!Array.isArray(filter.values) || filter.values.length === 0) {
+    throw new AppError("Semantic filter values are required", "INVALID_SEMANTIC_FILTER_VALUES", 400, {
+      dimensionId: filter.dimensionId
+    });
+  }
+
+  if (filter.values.length > 20) {
+    throw new AppError("Too many semantic filter values requested", "SEMANTIC_FILTER_VALUE_LIMIT_EXCEEDED", 400, {
+      dimensionId: filter.dimensionId,
+      count: filter.values.length,
+      limit: 20
+    });
+  }
+
+  for (const value of filter.values) {
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) {
+        throw new AppError("Semantic filter values must be finite", "INVALID_SEMANTIC_FILTER_VALUE", 400, {
+          dimensionId: filter.dimensionId
+        });
+      }
+
+      continue;
+    }
+
+    if (typeof value === "boolean") {
+      continue;
+    }
+
+    assertBoundedSemanticText(
+      value,
+      "filter.value",
+      policy.maxDatasetCellChars,
+      "SEMANTIC_FILTER_VALUE_TOO_LARGE"
+    );
+  }
+}
+
+function assertSemanticFilterOperator(operator: SemanticMetricFilterDefinition["operator"]): void {
+  if (
+    operator !== "=" &&
+    operator !== "!=" &&
+    operator !== ">" &&
+    operator !== ">=" &&
+    operator !== "<" &&
+    operator !== "<=" &&
+    operator !== "in"
+  ) {
+    throw new AppError("Semantic filter operator is invalid", "INVALID_SEMANTIC_FILTER_OPERATOR", 400, {
+      operator
+    });
+  }
+}
+
+function assertSemanticTimeGrain(timeGrain: SemanticTimeGrain): void {
+  if (timeGrain !== "raw" && timeGrain !== "day" && timeGrain !== "week" && timeGrain !== "month") {
+    throw new AppError("Semantic timeGrain is invalid", "INVALID_SEMANTIC_TIME_GRAIN", 400, {
+      timeGrain
+    });
+  }
+}
+
+function assertBoundedSemanticText(
+  value: unknown,
+  name: string,
+  maxChars: number,
+  code: string
+): asserts value is string {
+  if (typeof value !== "string") {
+    throw new AppError(`${name} must be a string`, `INVALID_${name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`, 400);
+  }
+
+  if (value.length === 0) {
+    throw new AppError(`${name} cannot be empty`, `EMPTY_${name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`, 400);
+  }
+
+  if (value.length > maxChars) {
+    throw new AppError(`${name} is too large`, code, 400, {
+      name,
+      length: value.length,
+      limit: maxChars
+    });
+  }
 }
 
 function createQueryExecutor(
@@ -1523,19 +3410,12 @@ function assertSqlStatementAccess(
   );
 }
 
-async function executeValidatedSqlQuery(
+function validateAuthorizedSqlStatement(
   sql: string,
   metadataCatalog: PrismaSchemaCatalog,
-  queryExecutor: ReadOnlyQueryExecutor,
   role?: UserRole,
   sqlAccessPolicy?: SqlReadAccessPolicy
-): Promise<{
-  readonly columns: readonly string[];
-  readonly rows: readonly Readonly<Record<string, unknown>>[];
-  readonly rowCount: number;
-  readonly durationMs: number;
-  readonly validation: ReturnType<typeof validateSqlStatement>;
-}> {
+): SqlStatementValidation {
   const validation = validateSqlStatement(sql, {
     tables: metadataCatalog.tables,
     maxLimit: DEFAULT_SQL_LIMIT
@@ -1568,12 +3448,189 @@ async function executeValidatedSqlQuery(
     }
   }
 
+  return validation;
+}
+
+async function executeValidatedSqlQuery(
+  sql: string,
+  metadataCatalog: PrismaSchemaCatalog,
+  queryExecutor: ReadOnlyQueryExecutor,
+  role?: UserRole,
+  sqlAccessPolicy?: SqlReadAccessPolicy
+) : Promise<ValidatedSqlQueryExecutionResult> {
+  const validation = validateAuthorizedSqlStatement(
+    sql,
+    metadataCatalog,
+    role,
+    sqlAccessPolicy
+  );
   const result = await queryExecutor.executeReadOnlyQuery(validation.normalizedSql);
 
   return {
     ...result,
     validation
   };
+}
+
+async function executeCachedValidatedSqlQuery(
+  sql: string,
+  metadataCatalog: PrismaSchemaCatalog,
+  queryExecutor: ReadOnlyQueryExecutor,
+  queryResultCache: InMemoryQueryResultCache<SqlQueryExecutionPayload>,
+  role?: UserRole,
+  sqlAccessPolicy?: SqlReadAccessPolicy,
+  options: {
+    readonly useCache?: boolean;
+  } = {}
+): Promise<SqlQueryExecutionPayload> {
+  const validation = validateAuthorizedSqlStatement(
+    sql,
+    metadataCatalog,
+    role,
+    sqlAccessPolicy
+  );
+
+  return await executeCachedValidatedSqlQueryFromValidation(
+    validation,
+    queryExecutor,
+    queryResultCache,
+    role,
+    options
+  );
+}
+
+async function executeCachedValidatedSqlQueryFromValidation(
+  validation: SqlStatementValidation,
+  queryExecutor: ReadOnlyQueryExecutor,
+  queryResultCache: InMemoryQueryResultCache<SqlQueryExecutionPayload>,
+  role?: UserRole,
+  options: {
+    readonly useCache?: boolean;
+  } = {}
+): Promise<SqlQueryExecutionPayload> {
+  const cacheKey = buildSqlQueryExecutionCacheKey(validation.normalizedSql, role);
+
+  if (options.useCache !== false) {
+    const cached = queryResultCache.get(cacheKey);
+
+    if (cached) {
+      return {
+        ...cached.value,
+        cache: {
+          key: cacheKey,
+          hit: true,
+          createdAt: cached.createdAt,
+          expiresAt: cached.expiresAt
+        }
+      };
+    }
+  }
+
+  const result = await queryExecutor.executeReadOnlyQuery(validation.normalizedSql);
+  const payload: SqlQueryExecutionPayload = {
+    result: {
+      ...result,
+      validation
+    },
+    cache: {
+      key: cacheKey,
+      hit: false,
+      createdAt: "",
+      expiresAt: ""
+    }
+  };
+  const stored = queryResultCache.set(cacheKey, payload);
+
+  return {
+    ...stored.value,
+    cache: {
+      key: cacheKey,
+      hit: false,
+      createdAt: stored.createdAt,
+      expiresAt: stored.expiresAt
+    }
+  };
+}
+
+function buildSqlQueryExecutionCacheKey(
+  normalizedSql: string,
+  role: UserRole | undefined
+): string {
+  return buildQueryResultCacheKey(["sql.query", role ?? "", normalizedSql]);
+}
+
+function buildSqlAsyncQueryJobSummary(job: {
+  readonly jobId: string;
+  readonly status: "running" | "completed" | "failed";
+  readonly submittedAt: string;
+  readonly startedAt: string;
+  readonly completedAt?: string;
+  readonly expiresAt: string;
+  readonly cacheKey?: string;
+  readonly error?: {
+    readonly message: string;
+    readonly code?: string;
+  };
+  readonly result?: SqlQueryExecutionPayload;
+}): SqlAsyncQueryJobSummary {
+  return {
+    jobId: job.jobId,
+    status: job.status,
+    submittedAt: job.submittedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    expiresAt: job.expiresAt,
+    cacheKey: job.cacheKey,
+    rowCount: job.result?.result.rowCount,
+    durationMs: job.result?.result.durationMs,
+    referencedTables: job.result?.result.validation.referencedTables,
+    limit: job.result?.result.validation.limit,
+    error: job.error
+  };
+}
+
+function buildSqlQueryResponse(
+  payload: SqlQueryExecutionPayload,
+  pageRequest: SqlQueryPageRequest
+): ValidatedSqlQueryExecutionResult & {
+  readonly page: {
+    readonly offset: number;
+    readonly limit: number;
+    readonly returnedRows: number;
+    readonly hasMore: boolean;
+  };
+  readonly cache: SqlQueryCacheMetadata;
+} {
+  const pagedResult = paginateReadOnlyQueryResult(payload.result, {
+    offset: pageRequest.offset,
+    limit: pageRequest.pageLimit
+  });
+
+  return {
+    ...payload.result,
+    rows: pagedResult.rows,
+    page: pagedResult.page,
+    cache: payload.cache
+  };
+}
+
+function getSqlAsyncQueryJobOrThrow(
+  jobManager: InMemoryAsyncQueryJobManager<SqlQueryExecutionPayload>,
+  jobId: string | undefined
+) {
+  if (!jobId) {
+    throw new AppError("jobId is required", "SQL_QUERY_JOB_ID_REQUIRED", 400);
+  }
+
+  const job = jobManager.get(jobId);
+
+  if (!job) {
+    throw new AppError(`Unknown SQL query job: ${jobId}`, "SQL_QUERY_JOB_NOT_FOUND", 404, {
+      jobId
+    });
+  }
+
+  return job;
 }
 
 async function loadConfiguredMetadataCatalog(
@@ -1618,6 +3675,376 @@ async function refreshConfiguredMetadataCatalog(
   return await metadataService.refresh();
 }
 
+async function loadConfiguredSemanticCatalog(
+  config: ApiConfig,
+  metadataCatalog: PrismaSchemaCatalog,
+  semanticService: SemanticCatalogService,
+  logger: ReturnType<typeof createLogger>,
+  semanticCatalogLoader?: (
+    config: ApiConfig,
+    metadataCatalog: PrismaSchemaCatalog
+  ) => Promise<SemanticCatalog>
+): Promise<SemanticCatalog> {
+  if (semanticCatalogLoader) {
+    return await semanticCatalogLoader(config, metadataCatalog);
+  }
+
+  logger.info("loading semantic catalog", {
+    semanticCatalogPath: resolveSemanticCatalogPath(config)
+  });
+
+  return await semanticService.getCatalog();
+}
+
+async function refreshConfiguredSemanticCatalog(
+  config: ApiConfig,
+  metadataCatalog: PrismaSchemaCatalog,
+  semanticService: SemanticCatalogService,
+  logger: ReturnType<typeof createLogger>,
+  semanticCatalogLoader?: (
+    config: ApiConfig,
+    metadataCatalog: PrismaSchemaCatalog
+  ) => Promise<SemanticCatalog>
+): Promise<SemanticCatalog> {
+  if (semanticCatalogLoader) {
+    return await semanticCatalogLoader(config, metadataCatalog);
+  }
+
+  logger.info("refreshing semantic catalog", {
+    semanticCatalogPath: resolveSemanticCatalogPath(config)
+  });
+
+  return await semanticService.refresh();
+}
+
+function resolveSemanticCatalogPath(config: ApiConfig): string {
+  if (config.semanticCatalogPath.trim().length === 0) {
+    return config.metadataSource === "postgres"
+      ? resolve(moduleDir, "../../../packages/database/semantic/postgres-catalog.json")
+      : defaultSemanticCatalogPath;
+  }
+
+  return resolve(config.semanticCatalogPath);
+}
+
+function buildDefaultAnalysisAgentEvaluationCases(
+  registeredToolNames: readonly string[]
+): readonly AgentEvaluationCase[] {
+  const tools = new Set(registeredToolNames);
+  const cases: AgentEvaluationCase[] = [];
+
+  if (tools.has("search-metadata") && tools.has("query-sql")) {
+    cases.push({
+      id: "metadata-record-count",
+      message: "订单中有多少记录？",
+      expected: {
+        requiredToolNames: ["search-metadata", "query-sql"],
+        minToolCalls: 2
+      }
+    });
+  } else if (tools.has("validate-sql")) {
+    cases.push({
+      id: "sql-safety-validation",
+      message: "Can I safely run select id, tenantId from AuditLog limit 20?",
+      expected: {
+        requiredToolNames: ["validate-sql"],
+        minToolCalls: 1
+      }
+    });
+  }
+
+  if (tools.has("search-semantics") && tools.has("query-metric")) {
+    cases.push({
+      id: "semantic-metric-query",
+      message: "按租户名称统计租户数",
+      expected: {
+        requiredToolNames: ["search-semantics", "query-metric"],
+        minToolCalls: 2
+      }
+    });
+  } else if (tools.has("search-semantics") && tools.has("generate-metric-sql")) {
+    cases.push({
+      id: "semantic-sql-generation",
+      message: "Generate SQL for tenant count grouped by tenant name",
+      expected: {
+        requiredToolNames: ["search-semantics", "generate-metric-sql"],
+        minToolCalls: 2
+      }
+    });
+  }
+
+  if (cases.length === 0) {
+    cases.push({
+      id: "assistant-readiness",
+      message: "Reply with a short readiness summary for the analysis agent.",
+      expected: {
+        maxToolCalls: 0
+      }
+    });
+  }
+
+  return cases;
+}
+
+function parseAnalysisAgentEvaluationRequest(
+  body: unknown,
+  policy: ReturnType<typeof buildRequestSecurityPolicy>,
+  defaultCases: readonly AgentEvaluationCase[]
+): {
+  readonly name?: string;
+  readonly sessionIdPrefix?: string;
+  readonly cases: readonly AgentEvaluationCase[];
+} {
+  if (typeof body === "undefined" || body === null) {
+    return {
+      cases: defaultCases
+    };
+  }
+
+  if (!isRecordLike(body)) {
+    throw new AppError(
+      "Analysis agent evaluation request must be an object",
+      "INVALID_ANALYSIS_AGENT_EVALUATION_REQUEST",
+      400
+    );
+  }
+
+  const name = readOptionalBoundedText(
+    body.name,
+    "name",
+    policy.maxSessionTitleChars,
+    "ANALYSIS_AGENT_EVALUATION_NAME_TOO_LARGE"
+  );
+  const sessionIdPrefix = readOptionalBoundedText(
+    body.sessionIdPrefix,
+    "sessionIdPrefix",
+    policy.maxSessionIdChars,
+    "ANALYSIS_AGENT_EVALUATION_SESSION_PREFIX_TOO_LARGE"
+  );
+
+  if (typeof body.cases === "undefined") {
+    return {
+      ...(name ? { name } : {}),
+      ...(sessionIdPrefix ? { sessionIdPrefix } : {}),
+      cases: defaultCases
+    };
+  }
+
+  if (!Array.isArray(body.cases) || body.cases.length === 0) {
+    throw new AppError(
+      "Analysis agent evaluation cases must be a non-empty array",
+      "INVALID_ANALYSIS_AGENT_EVALUATION_CASES",
+      400
+    );
+  }
+
+  return {
+    ...(name ? { name } : {}),
+    ...(sessionIdPrefix ? { sessionIdPrefix } : {}),
+    cases: body.cases.map((value, index) =>
+      parseAnalysisAgentEvaluationCase(value, index, policy)
+    )
+  };
+}
+
+function parseAnalysisAgentEvaluationCase(
+  value: unknown,
+  index: number,
+  policy: ReturnType<typeof buildRequestSecurityPolicy>
+): AgentEvaluationCase {
+  if (!isRecordLike(value)) {
+    throw new AppError(
+      "Analysis agent evaluation case must be an object",
+      "INVALID_ANALYSIS_AGENT_EVALUATION_CASE",
+      400,
+      {
+        index
+      }
+    );
+  }
+
+  const id = readRequiredBoundedText(
+    value.id,
+    "id",
+    policy.maxSessionIdChars,
+    "ANALYSIS_AGENT_EVALUATION_CASE_ID_TOO_LARGE"
+  );
+  const message = readRequiredBoundedText(
+    value.message,
+    "message",
+    policy.maxChatMessageChars,
+    "ANALYSIS_AGENT_EVALUATION_CASE_MESSAGE_TOO_LARGE"
+  );
+  const model = readOptionalBoundedText(
+    value.model,
+    "model",
+    policy.maxModelChars,
+    "ANALYSIS_AGENT_EVALUATION_CASE_MODEL_TOO_LARGE"
+  );
+  const sessionId = readOptionalBoundedText(
+    value.sessionId,
+    "sessionId",
+    policy.maxSessionIdChars,
+    "ANALYSIS_AGENT_EVALUATION_CASE_SESSION_ID_TOO_LARGE"
+  );
+
+  return {
+    id,
+    message,
+    ...(model ? { model } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(typeof value.expected !== "undefined"
+      ? {
+          expected: parseAnalysisAgentEvaluationExpectations(value.expected, index)
+        }
+      : {})
+  };
+}
+
+function parseAnalysisAgentEvaluationExpectations(
+  value: unknown,
+  index: number
+): AgentEvaluationCase["expected"] {
+  if (!isRecordLike(value)) {
+    throw new AppError(
+      "Analysis agent evaluation expectations must be an object",
+      "INVALID_ANALYSIS_AGENT_EVALUATION_EXPECTATIONS",
+      400,
+      {
+        index
+      }
+    );
+  }
+
+  const minToolCalls = readOptionalNonNegativeInteger(
+    value.minToolCalls,
+    "minToolCalls",
+    "ANALYSIS_AGENT_EVALUATION_MIN_TOOL_CALLS_INVALID"
+  );
+  const maxToolCalls = readOptionalNonNegativeInteger(
+    value.maxToolCalls,
+    "maxToolCalls",
+    "ANALYSIS_AGENT_EVALUATION_MAX_TOOL_CALLS_INVALID"
+  );
+
+  if (
+    typeof minToolCalls === "number" &&
+    typeof maxToolCalls === "number" &&
+    minToolCalls > maxToolCalls
+  ) {
+    throw new AppError(
+      "Analysis agent evaluation minToolCalls cannot exceed maxToolCalls",
+      "ANALYSIS_AGENT_EVALUATION_TOOL_CALL_RANGE_INVALID",
+      400,
+      {
+        index,
+        minToolCalls,
+        maxToolCalls
+      }
+    );
+  }
+
+  return {
+    outputIncludes: readOptionalStringArray(
+      value.outputIncludes,
+      "outputIncludes",
+      "ANALYSIS_AGENT_EVALUATION_OUTPUT_INCLUDES_INVALID"
+    ),
+    outputExcludes: readOptionalStringArray(
+      value.outputExcludes,
+      "outputExcludes",
+      "ANALYSIS_AGENT_EVALUATION_OUTPUT_EXCLUDES_INVALID"
+    ),
+    requiredToolNames: readOptionalStringArray(
+      value.requiredToolNames,
+      "requiredToolNames",
+      "ANALYSIS_AGENT_EVALUATION_REQUIRED_TOOLS_INVALID"
+    ),
+    forbiddenToolNames: readOptionalStringArray(
+      value.forbiddenToolNames,
+      "forbiddenToolNames",
+      "ANALYSIS_AGENT_EVALUATION_FORBIDDEN_TOOLS_INVALID"
+    ),
+    ...(typeof minToolCalls === "number" ? { minToolCalls } : {}),
+    ...(typeof maxToolCalls === "number" ? { maxToolCalls } : {})
+  };
+}
+
+function readOptionalBoundedText(
+  value: unknown,
+  name: string,
+  maxChars: number,
+  code: string
+): string | undefined {
+  if (typeof value === "undefined" || value === null) {
+    return undefined;
+  }
+
+  return readRequiredBoundedText(value, name, maxChars, code);
+}
+
+function readRequiredBoundedText(
+  value: unknown,
+  name: string,
+  maxChars: number,
+  code: string
+): string {
+  assertBoundedSemanticText(value, name, maxChars, code);
+  return value.trim();
+}
+
+function readOptionalNonNegativeInteger(
+  value: unknown,
+  name: string,
+  code: string
+): number | undefined {
+  if (typeof value === "undefined" || value === null) {
+    return undefined;
+  }
+
+  const parsedValue = typeof value === "number" ? value : Number.NaN;
+
+  if (!Number.isInteger(parsedValue) || parsedValue < 0) {
+    throw new AppError(`${name} must be a non-negative integer`, code, 400, {
+      name,
+      value
+    });
+  }
+
+  return parsedValue;
+}
+
+function readOptionalStringArray(
+  value: unknown,
+  name: string,
+  code: string
+): readonly string[] | undefined {
+  if (typeof value === "undefined" || value === null) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new AppError(`${name} must be an array`, code, 400, {
+      name
+    });
+  }
+
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      throw new AppError(`${name} contains an invalid value`, code, 400, {
+        name,
+        index
+      });
+    }
+
+    return entry.trim();
+  });
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function getAgentExecutor(agentExecutor?: AgentExecutor): AgentExecutor {
   if (!agentExecutor) {
     throw new AppError(
@@ -1654,6 +4081,56 @@ function applySseCorsHeaders(
 
   reply.raw.setHeader("Access-Control-Allow-Origin", origin);
   reply.raw.setHeader("Vary", "Origin");
+}
+
+function assertOperatorRequestAuthorized(
+  request: {
+    headers: Readonly<Record<string, string | string[] | undefined>>;
+  },
+  config: ApiConfig
+): void {
+  if (config.operatorApiKey.trim().length === 0) {
+    throw new AppError(
+      "Operator session endpoints are not configured. Set OPERATOR_API_KEY to enable them.",
+      "OPERATOR_API_KEY_NOT_CONFIGURED",
+      503
+    );
+  }
+
+  const headerValue = request.headers["x-operator-api-key"];
+  const providedKey =
+    typeof headerValue === "string"
+      ? headerValue
+      : Array.isArray(headerValue)
+        ? headerValue[0]
+        : undefined;
+
+  if (!providedKey || providedKey.trim().length === 0) {
+    throw new AppError(
+      "Operator API key is required",
+      "OPERATOR_API_KEY_REQUIRED",
+      403
+    );
+  }
+
+  if (!secureTextEquals(providedKey, config.operatorApiKey)) {
+    throw new AppError(
+      "Operator API key is invalid",
+      "INVALID_OPERATOR_API_KEY",
+      403
+    );
+  }
+}
+
+function secureTextEquals(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left, "utf8");
+  const rightBuffer = Buffer.from(right, "utf8");
+
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+
+  return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function findCatalogTable(

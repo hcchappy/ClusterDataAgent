@@ -1,0 +1,193 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "orders",
+      "label": "Orders",
+      "tableName": "cda_orders",
+      "primaryKey": "id",
+      "description": "Commerce orders in the PostgreSQL demo fixture.",
+      "owner": "sales-ops",
+      "refreshCadence": "hourly",
+      "synonyms": ["order", "orders", "订单"],
+      "defaultMetricIds": ["order_count", "gross_amount"],
+      "dimensions": [
+        {
+          "id": "id",
+          "label": "Order ID",
+          "columnName": "id",
+          "dataType": "number"
+        },
+        {
+          "id": "customerId",
+          "label": "Customer ID",
+          "columnName": "customer_id",
+          "dataType": "number",
+          "synonyms": ["customer", "客户ID"]
+        },
+        {
+          "id": "status",
+          "label": "Order Status",
+          "columnName": "status",
+          "dataType": "string",
+          "synonyms": ["order state", "状态"]
+        },
+        {
+          "id": "channel",
+          "label": "Order Channel",
+          "columnName": "channel",
+          "dataType": "string",
+          "synonyms": ["sales channel", "渠道"]
+        },
+        {
+          "id": "createdAt",
+          "label": "Order Created At",
+          "columnName": "created_at",
+          "dataType": "date",
+          "isTimeDimension": true,
+          "synonyms": ["order date", "下单时间"]
+        }
+      ]
+    },
+    {
+      "id": "customers",
+      "label": "Customers",
+      "tableName": "cda_customers",
+      "primaryKey": "id",
+      "description": "Commerce customers in the PostgreSQL demo fixture.",
+      "owner": "sales-ops",
+      "refreshCadence": "hourly",
+      "synonyms": ["customer", "customers", "客户"],
+      "defaultMetricIds": ["customer_count"],
+      "dimensions": [
+        {
+          "id": "id",
+          "label": "Customer ID",
+          "columnName": "id",
+          "dataType": "number"
+        },
+        {
+          "id": "name",
+          "label": "Customer Name",
+          "columnName": "name",
+          "dataType": "string"
+        },
+        {
+          "id": "region",
+          "label": "Customer Region",
+          "columnName": "region",
+          "dataType": "string"
+        },
+        {
+          "id": "segment",
+          "label": "Customer Segment",
+          "columnName": "segment",
+          "dataType": "string"
+        },
+        {
+          "id": "createdAt",
+          "label": "Customer Created At",
+          "columnName": "created_at",
+          "dataType": "date",
+          "isTimeDimension": true
+        }
+      ]
+    },
+    {
+      "id": "orderEvents",
+      "label": "Order Events",
+      "tableName": "cda_order_events",
+      "primaryKey": "id",
+      "description": "Lifecycle events for each order in the PostgreSQL demo fixture.",
+      "owner": "sales-ops",
+      "refreshCadence": "hourly",
+      "synonyms": ["event", "events", "订单事件"],
+      "defaultMetricIds": ["order_event_count"],
+      "dimensions": [
+        {
+          "id": "id",
+          "label": "Event ID",
+          "columnName": "id",
+          "dataType": "number"
+        },
+        {
+          "id": "orderId",
+          "label": "Order ID",
+          "columnName": "order_id",
+          "dataType": "number"
+        },
+        {
+          "id": "eventName",
+          "label": "Event Name",
+          "columnName": "event_name",
+          "dataType": "string"
+        },
+        {
+          "id": "createdAt",
+          "label": "Event Created At",
+          "columnName": "created_at",
+          "dataType": "date",
+          "isTimeDimension": true
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "order_count",
+      "label": "Order Count",
+      "modelId": "orders",
+      "aggregation": "count",
+      "columnName": "id",
+      "description": "Total number of orders.",
+      "owner": "sales-ops",
+      "refreshCadence": "hourly",
+      "format": "integer",
+      "synonyms": ["orders", "订单数"],
+      "allowedDimensionIds": ["orders.status", "orders.channel", "orders.createdAt"],
+      "defaultTimeDimensionId": "orders.createdAt"
+    },
+    {
+      "id": "gross_amount",
+      "label": "Gross Amount",
+      "modelId": "orders",
+      "aggregation": "sum",
+      "columnName": "amount",
+      "description": "Total gross order amount.",
+      "owner": "sales-ops",
+      "refreshCadence": "hourly",
+      "format": "currency",
+      "synonyms": ["gmv", "revenue", "销售额"],
+      "allowedDimensionIds": ["orders.status", "orders.channel", "orders.createdAt"],
+      "defaultTimeDimensionId": "orders.createdAt"
+    },
+    {
+      "id": "customer_count",
+      "label": "Customer Count",
+      "modelId": "customers",
+      "aggregation": "count",
+      "columnName": "id",
+      "description": "Total number of customers.",
+      "owner": "sales-ops",
+      "refreshCadence": "hourly",
+      "format": "integer",
+      "synonyms": ["customers", "客户数"],
+      "allowedDimensionIds": ["customers.region", "customers.segment", "customers.createdAt"],
+      "defaultTimeDimensionId": "customers.createdAt"
+    },
+    {
+      "id": "order_event_count",
+      "label": "Order Event Count",
+      "modelId": "orderEvents",
+      "aggregation": "count",
+      "columnName": "id",
+      "description": "Total number of order lifecycle events.",
+      "owner": "sales-ops",
+      "refreshCadence": "hourly",
+      "format": "integer",
+      "synonyms": ["events", "事件数"],
+      "allowedDimensionIds": ["orderEvents.eventName", "orderEvents.createdAt"],
+      "defaultTimeDimensionId": "orderEvents.createdAt"
+    }
+  ]
+}
